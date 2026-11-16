@@ -16,6 +16,9 @@ from online_budget import (
 from online_budget.canonical import b64encode, canonical_json_bytes, digest
 from online_budget.agent_runtime import AgentToolRuntime
 from online_budget.executor import LocalToolRegistry, ToolExecutionDenied, TrustedToolExecutor
+from online_budget.executor_authorization import (
+    executor_admission_digest, issue_executor_authorization,
+)
 from online_budget.tool_binding import ToolCallBinding, arguments_digest, build_tool_call_binding, snapshot_arguments
 
 
@@ -292,6 +295,132 @@ class D10ToolExecutionTests(unittest.TestCase):
     def test_canonical_argument_profile_rejects_floats(self):
         with self.assertRaises(ValueError):
             arguments_digest({"amount": 1.25})
+
+    def _make_executor_authorization(self, *, executor_public_key=None, tool_name="invoice_review", schema_hash=None):
+        return issue_executor_authorization(
+            self.issuer_key, issuer_id=self.lease.issuer_id,
+            authorization_id="auth-" + self.execution["operation_id"],
+            online_lease_grant=self.lease, execution_grant=self.execution,
+            gateway_id=self.GATEWAY_ID, coordinator_id=self.COORDINATOR_ID,
+            executor_id=self.EXECUTOR_ID,
+            executor_public_key=executor_public_key or self.executor_key.public_key(),
+            tool_name=tool_name, tool_schema_hash=schema_hash or self.schema_hash,
+            issued_at=self.NOW - 5, expires_at=self.NOW + 300,
+        )
+
+    def test_d104_runtime_authorization_is_bound_into_coordinator_receipt(self):
+        authorization = self._make_executor_authorization()
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        receipt = runtime.run_tool_call(tool_name="invoice_review", arguments={"invoice_id": "INV-D104"})
+        self.assertEqual(receipt["payload"]["status"], "SUCCEEDED")
+        coordinator_receipt = self.adapter.coordinator_receipt_for_operation(self.execution["operation_id"])
+        expected_digest = executor_admission_digest(
+            receipt["payload"]["binding_digest"], authorization,
+        )
+        self.assertEqual(coordinator_receipt["payload"]["request_digest"], expected_digest)
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+    def test_d104_wrong_executor_key_is_denied_before_budget_consumption(self):
+        wrong_key = Ed25519PrivateKey.generate().public_key()
+        authorization = self._make_executor_authorization(executor_public_key=wrong_key)
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(tool_name="invoice_review", arguments={"invoice_id": "INV-D104"})
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_d104_wrong_tool_binding_is_denied_before_budget_consumption(self):
+        self.registry._schemas["other_tool"] = {
+            "type": "object", "additionalProperties": False, "required": ["value"],
+            "properties": {"value": {"type": "string", "minLength": 1}},
+        }
+        self.registry._tools["other_tool"] = lambda arguments: {"value": arguments["value"]}
+        authorization = self._make_executor_authorization()
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(tool_name="other_tool", arguments={"value": "x"})
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_d104_executor_rechecks_authorization_at_dispatch_boundary(self):
+        authorization = self._make_executor_authorization(
+            executor_public_key=Ed25519PrivateKey.generate().public_key(),
+        )
+        args = {"invoice_id": "INV-D104-DIRECT"}
+        binding = self._binding(args)
+        request_digest = executor_admission_digest(binding.binding_digest, authorization)
+        self.adapter.consume_for_grant(
+            self.execution, operation_id=binding.operation_id, request_digest=request_digest,
+        )
+        budget_receipt = self.adapter.coordinator_receipt_for_operation(binding.operation_id)
+        with self.assertRaises(ToolExecutionDenied):
+            self.executor.execute(
+                binding=binding, arguments=args, online_lease_grant=self.lease,
+                execution_grant=self.execution, budget_receipt=budget_receipt,
+                executor_authorization=authorization,
+            )
+
+
+    def test_d104_expired_authorization_is_denied_before_budget_consumption(self):
+        authorization = issue_executor_authorization(
+            self.issuer_key, issuer_id=self.lease.issuer_id,
+            authorization_id="auth-expired-" + self.execution["operation_id"],
+            online_lease_grant=self.lease, execution_grant=self.execution,
+            gateway_id=self.GATEWAY_ID, coordinator_id=self.COORDINATOR_ID,
+            executor_id=self.EXECUTOR_ID, executor_public_key=self.executor_key.public_key(),
+            tool_name="invoice_review", tool_schema_hash=self.schema_hash,
+            issued_at=self.NOW - 10, expires_at=self.NOW,
+        )
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(tool_name="invoice_review", arguments={"invoice_id": "INV-EXPIRED-AUTH"})
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_d104_tampered_authorization_signature_is_denied_before_budget_consumption(self):
+        authorization = self._make_executor_authorization()
+        tampered = authorization.as_dict()
+        tampered["payload"]["authorization_id"] += "-tampered"
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=tampered,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(tool_name="invoice_review", arguments={"invoice_id": "INV-TAMPERED-AUTH"})
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_d104_authorization_for_another_executor_id_is_denied_before_budget_consumption(self):
+        authorization = issue_executor_authorization(
+            self.issuer_key, issuer_id=self.lease.issuer_id,
+            authorization_id="auth-wrong-id-" + self.execution["operation_id"],
+            online_lease_grant=self.lease, execution_grant=self.execution,
+            gateway_id=self.GATEWAY_ID, coordinator_id=self.COORDINATOR_ID,
+            executor_id="different-executor", executor_public_key=self.executor_key.public_key(),
+            tool_name="invoice_review", tool_schema_hash=self.schema_hash,
+            issued_at=self.NOW - 5, expires_at=self.NOW + 300,
+        )
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(tool_name="invoice_review", arguments={"invoice_id": "INV-WRONG-EXECUTOR"})
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
 
 
 if __name__ == "__main__":

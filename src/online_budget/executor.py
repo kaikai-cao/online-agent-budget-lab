@@ -6,7 +6,11 @@ from typing import Any, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-from .canonical import digest
+from .canonical import digest, public_key_bytes
+from .executor_authorization import (
+    ExecutorAuthorization, ExecutorAuthorizationError, executor_admission_digest,
+    verify_executor_authorization,
+)
 from .execution_receipts import ExecutionReceipt, sign_execution_receipt, verify_execution_receipt
 from .execution_store import ExecutionStore
 from .grants import (
@@ -121,11 +125,35 @@ class TrustedToolExecutor:
             raise ToolExecutionDenied("tool/schema pair is not authorized by both Grants")
         return execution
 
+    def _verify_executor_authorization(
+        self, binding: ToolCallBinding, online_grant: OnlineLeaseGrant,
+        execution_grant: Mapping[str, Any],
+        executor_authorization: ExecutorAuthorization | Mapping[str, Any] | None,
+    ) -> None:
+        # None preserves the pre-D10.4 compatibility path. When a D10.4
+        # authorization is supplied, the Executor independently verifies it.
+        if executor_authorization is None:
+            return
+        try:
+            authorized_key = verify_executor_authorization(
+                executor_authorization, self.issuer_public_key,
+                online_lease_grant=online_grant, execution_grant=execution_grant,
+                gateway_id=binding.gateway_id, coordinator_id=binding.coordinator_id,
+                executor_id=self.executor_id, tool_name=binding.tool_name,
+                tool_schema_hash=binding.tool_schema_hash, now=int(self.clock()),
+            )
+        except ExecutorAuthorizationError as exc:
+            raise ToolExecutionDenied(f"Executor Authorization rejected: {exc}") from exc
+        if public_key_bytes(authorized_key) != public_key_bytes(self.executor_private_key.public_key()):
+            raise ToolExecutionDenied("Executor Authorization names a different Executor key")
+
     def _verify_admission(
         self, binding: ToolCallBinding, online_grant: OnlineLeaseGrant,
         execution_grant: Mapping[str, Any], budget_receipt: BudgetReceipt | Mapping[str, Any],
+        executor_authorization: ExecutorAuthorization | Mapping[str, Any] | None = None,
     ) -> BudgetReceipt:
         self._verify_grant_binding(binding, online_grant, execution_grant)
+        self._verify_executor_authorization(binding, online_grant, execution_grant, executor_authorization)
         receipt = budget_receipt if isinstance(budget_receipt, BudgetReceipt) else BudgetReceipt.from_dict(budget_receipt)
         expected = {
             "coordinator_id": binding.coordinator_id,
@@ -135,8 +163,11 @@ class TrustedToolExecutor:
             "global_lease_grant_digest": binding.global_lease_grant_digest,
             "execution_grant_digest": binding.execution_grant_digest,
             "operation_id": binding.operation_id,
-            # D9 request_digest is reused as the binding commitment for D10 calls.
-            "request_digest": binding.binding_digest,
+            # D10.4 commits to both binding and signed Executor Authorization.
+            "request_digest": (
+                binding.binding_digest if executor_authorization is None
+                else executor_admission_digest(binding.binding_digest, executor_authorization)
+            ),
         }
         if not verify_budget_receipt(receipt, self.coordinator_public_key, expected=expected):
             raise ToolExecutionDenied("Coordinator Budget Receipt signature/admission binding is invalid")
@@ -145,6 +176,7 @@ class TrustedToolExecutor:
     def prepare_tool_call(
         self, *, binding: ToolCallBinding | Mapping[str, Any], arguments: Mapping[str, Any],
         online_lease_grant: OnlineLeaseGrant, execution_grant: Mapping[str, Any],
+        executor_authorization: ExecutorAuthorization | Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Preflight authorization and return the detached arguments snapshot.
 
@@ -154,6 +186,7 @@ class TrustedToolExecutor:
         parsed = binding if isinstance(binding, ToolCallBinding) else ToolCallBinding.from_dict(binding)
         parsed.validate()
         self._verify_grant_binding(parsed, online_lease_grant, execution_grant)
+        self._verify_executor_authorization(parsed, online_lease_grant, execution_grant, executor_authorization)
         if self.registry.schema_hash(parsed.tool_name) != parsed.tool_schema_hash:
             raise ToolExecutionDenied("registered tool schema has drifted")
         try:
@@ -172,14 +205,18 @@ class TrustedToolExecutor:
         self, *, binding: ToolCallBinding | Mapping[str, Any], arguments: Mapping[str, Any],
         online_lease_grant: OnlineLeaseGrant, execution_grant: Mapping[str, Any],
         budget_receipt: BudgetReceipt | Mapping[str, Any],
+        executor_authorization: ExecutorAuthorization | Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         binding = binding if isinstance(binding, ToolCallBinding) else ToolCallBinding.from_dict(binding)
         binding.validate()
         safe_arguments = self.prepare_tool_call(
             binding=binding, arguments=arguments, online_lease_grant=online_lease_grant,
-            execution_grant=execution_grant,
+            execution_grant=execution_grant, executor_authorization=executor_authorization,
         )
-        receipt = self._verify_admission(binding, online_lease_grant, execution_grant, budget_receipt)
+        receipt = self._verify_admission(
+            binding, online_lease_grant, execution_grant, budget_receipt,
+            executor_authorization=executor_authorization,
+        )
         now = int(self.clock())
 
         def make_receipt(state: str, result: Any, error: str | None, completed_at: int) -> dict[str, Any]:
