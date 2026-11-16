@@ -280,7 +280,11 @@ class OnlineCoordinatorTests(unittest.TestCase):
                       headers={"Content-Type": "application/json"}, method="POST")
         with self.assertRaises(HTTPError) as ctx:
             urlopen(req, timeout=3)
-        self.assertEqual(ctx.exception.code, 401)
+        error = ctx.exception
+        try:
+            self.assertEqual(error.code, 401)
+        finally:
+            error.close()
         self.assertEqual(self.coordinator.inspect()["global_used_count"], 0)
 
     def test_receipt_signature_tampering_is_detected(self):

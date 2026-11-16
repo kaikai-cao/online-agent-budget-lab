@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from typing import Any
@@ -13,10 +14,22 @@ MAX_BODY_BYTES = 1_048_576
 
 
 class CoordinatorHTTPServer(ThreadingHTTPServer):
+    """Loopback-only HTTP server; terminate TLS at a reverse proxy for remote Gateways."""
+
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, server_address, coordinator):
+        host = server_address[0]
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = isinstance(host, str) and host.lower() == "localhost"
+        if not loopback:
+            raise ValueError(
+                "built-in Coordinator HTTP server is loopback-only; use a TLS reverse proxy "
+                "and forward to 127.0.0.1"
+            )
         self.coordinator = coordinator
         super().__init__(server_address, CoordinatorRequestHandler)
 
@@ -35,6 +48,8 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -42,9 +57,15 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/health":
             info = self.server.coordinator.inspect()
-            self._send_json(200, {"ok": True, "coordinator_id": info["coordinator_id"],
-                                  "global_budget_id": info["global_budget_id"], "health": info["health"]})
+            # This unauthenticated endpoint intentionally exposes only non-secret identity/health fields.
+            self._send_json(200, {
+                "ok": True,
+                "coordinator_id": info["coordinator_id"],
+                "global_budget_id": info["global_budget_id"],
+                "health": info["health"],
+            })
             return
+        self.close_connection = True
         self._send_json(404, {"ok": False, "error": {"code": "NOT_FOUND", "message": "unknown endpoint"}})
 
     def do_POST(self):
@@ -53,16 +74,48 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
             "/v1/leases/register", "/v1/leases/revoke", "/v1/leases/lookup",
             "/v1/budget/consume", "/v1/budget/lookup",
         }:
+            # The request body has not been consumed; close to prevent keep-alive desynchronization.
+            self.close_connection = True
             self._send_json(404, {"ok": False, "error": {"code": "NOT_FOUND", "message": "unknown endpoint"}})
             return
+
+        # Reject ambiguous framing. The built-in server does not implement chunked request bodies.
+        content_lengths = self.headers.get_all("Content-Length", [])
+        transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
+        if len(content_lengths) != 1 or transfer_encodings:
+            self.close_connection = True
+            self._send_json(400, {"ok": False, "error": {"code": "BAD_REQUEST", "message": "exactly one Content-Length is required; Transfer-Encoding is unsupported"}})
+            return
+
         try:
-            raw_length = self.headers.get("Content-Length")
-            if raw_length is None:
-                raise ValueError("Content-Length is required")
-            length = int(raw_length)
-            if length < 1 or length > MAX_BODY_BYTES:
-                raise ValueError("request body size is invalid")
-            envelope = json.loads(self.rfile.read(length).decode("utf-8"))
+            length = int(content_lengths[0])
+        except (TypeError, ValueError):
+            self.close_connection = True
+            self._send_json(400, {"ok": False, "error": {"code": "BAD_REQUEST", "message": "Content-Length is invalid"}})
+            return
+
+        if length < 1:
+            self.close_connection = True
+            self._send_json(400, {"ok": False, "error": {"code": "BAD_REQUEST", "message": "request body length must be positive"}})
+            return
+        if length > MAX_BODY_BYTES:
+            self.close_connection = True
+            self._send_json(413, {"ok": False, "error": {"code": "PAYLOAD_TOO_LARGE", "message": "request body exceeds configured limit"}})
+            return
+
+        content_type = self.headers.get("Content-Type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            self.close_connection = True
+            self._send_json(415, {"ok": False, "error": {"code": "UNSUPPORTED_MEDIA_TYPE", "message": "Content-Type must be application/json"}})
+            return
+
+        try:
+            raw_body = self.rfile.read(length)
+            if len(raw_body) != length:
+                self.close_connection = True
+                raise ValueError("request body is incomplete")
+            envelope = json.loads(raw_body.decode("utf-8"))
             gateway_id, payload = verify_gateway_envelope(
                 envelope, method="POST", path=path,
                 gateway_lookup=self.server.coordinator.gateway_public_key,
@@ -72,6 +125,7 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
         except CoordinatorError as exc:
             self._send_json(exc.http_status, {"ok": False, "error": {"code": exc.code, "message": str(exc)}})
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            self.close_connection = True
             self._send_json(400, {"ok": False, "error": {"code": "BAD_REQUEST", "message": str(exc)}})
         except Exception:
             # Do not leak stack traces, key material, or database internals over HTTP.
