@@ -19,7 +19,10 @@ from online_budget.executor import LocalToolRegistry, ToolExecutionDenied, Trust
 from online_budget.executor_authorization import (
     executor_admission_digest, issue_executor_authorization,
 )
-from online_budget.tool_binding import ToolCallBinding, arguments_digest, build_tool_call_binding, snapshot_arguments
+from online_budget.tool_binding import (
+    CANONICALIZATION_VERSION, ToolCallBinding, arguments_digest,
+    build_tool_call_binding, snapshot_arguments,
+)
 
 
 class D10ToolExecutionTests(unittest.TestCase):
@@ -308,7 +311,9 @@ class D10ToolExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             arguments_digest({"amount": 1.25})
 
-    def _make_executor_authorization(self, *, executor_public_key=None, tool_name="invoice_review", schema_hash=None):
+    def _make_executor_authorization(self, *, executor_public_key=None, tool_name="invoice_review", schema_hash=None, arguments=None):
+        # D10.6: arguments=None preserves v1 issuance; supplying arguments
+        # issues v2 with the exact argument digest signed in.
         return issue_executor_authorization(
             self.issuer_key, issuer_id=self.lease.issuer_id,
             authorization_id="auth-" + self.execution["operation_id"],
@@ -318,6 +323,7 @@ class D10ToolExecutionTests(unittest.TestCase):
             executor_public_key=executor_public_key or self.executor_key.public_key(),
             tool_name=tool_name, tool_schema_hash=schema_hash or self.schema_hash,
             issued_at=self.NOW - 5, expires_at=self.NOW + 300,
+            arguments=arguments,
         )
 
     def test_d104_runtime_authorization_is_bound_into_coordinator_receipt(self):
@@ -473,9 +479,11 @@ class D10ToolExecutionTests(unittest.TestCase):
             )
 
     def test_required_policy_accepts_valid_authorization(self):
+        # D10.6: authorization_required is fail-closed for v1, so a valid
+        # authorization here must be v2 (argument binding present).
         executor = self._executor_for_policy("authorization_required")
         binding = self._binding()
-        authorization = self._make_executor_authorization()
+        authorization = self._make_executor_authorization(arguments={"invoice_id": "INV-100"})
         request_digest = executor_admission_digest(
             binding.binding_digest, authorization
         )
@@ -502,6 +510,130 @@ class D10ToolExecutionTests(unittest.TestCase):
     def test_unknown_authorization_policy_is_rejected(self):
         with self.assertRaises(ValueError):
             self._executor_for_policy("unknown-policy")
+
+    # ---- D10.6: Signed Executor Authorization v2 / exact argument binding ----
+
+    def test_d106_v2_correct_arguments_succeed(self):
+        args = {"invoice_id": "INV-100"}
+        authorization = self._make_executor_authorization(arguments=args)
+        self.assertEqual(authorization.payload["version"], 2)
+        self.assertEqual(authorization.payload["arguments_digest"], arguments_digest(args))
+        self.assertEqual(
+            authorization.payload["canonicalization_version"], CANONICALIZATION_VERSION
+        )
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        receipt = runtime.run_tool_call(tool_name="invoice_review", arguments=args)
+        self.assertEqual(receipt["payload"]["status"], "SUCCEEDED")
+        self.assertEqual(receipt["payload"]["result"]["invoice_id"], "INV-100")
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+    def test_d106_v2_invoice_100_auth_rejects_invoice_999_without_spending(self):
+        authorization = self._make_executor_authorization(
+            arguments={"invoice_id": "INV-100"}
+        )
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(
+                tool_name="invoice_review", arguments={"invoice_id": "INV-999"}
+            )
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_d106_v2_tampered_arguments_digest_in_signed_payload_is_rejected(self):
+        authorization = self._make_executor_authorization(
+            arguments={"invoice_id": "INV-100"}
+        ).as_dict()
+        # Tamper the signed payload: swap in a digest for INV-999 while keeping
+        # the original issuer signature. Signature verification must reject it.
+        authorization["payload"]["arguments_digest"] = arguments_digest(
+            {"invoice_id": "INV-999"}
+        )
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(
+                tool_name="invoice_review", arguments={"invoice_id": "INV-100"}
+            )
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_d106_v2_tampered_canonicalization_version_in_signed_payload_is_rejected(self):
+        authorization = self._make_executor_authorization(
+            arguments={"invoice_id": "INV-100"}
+        ).as_dict()
+        authorization["payload"]["canonicalization_version"] = "python-canonical-json-v0"
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(
+                tool_name="invoice_review", arguments={"invoice_id": "INV-100"}
+            )
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_d106_authorization_required_rejects_v1_without_spending(self):
+        executor = self._executor_for_policy("authorization_required")
+        authorization = self._make_executor_authorization()  # v1: no arguments
+        self.assertEqual(authorization.payload["version"], 1)
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        with self.assertRaises(ToolExecutionDenied):
+            runtime.run_tool_call(
+                tool_name="invoice_review", arguments={"invoice_id": "INV-100"}
+            )
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_d106_legacy_allowed_keeps_v1_compatible(self):
+        # Default policy is legacy_allowed; v1 authorization still works.
+        self.assertEqual(self.executor.authorization_policy, "legacy_allowed")
+        authorization = self._make_executor_authorization()  # v1
+        self.assertEqual(authorization.payload["version"], 1)
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter, executor=self.executor, online_lease_grant=self.lease,
+            execution_grant=self.execution, executor_id=self.EXECUTOR_ID,
+            executor_authorization=authorization,
+        )
+        receipt = runtime.run_tool_call(
+            tool_name="invoice_review", arguments={"invoice_id": "INV-100"}
+        )
+        self.assertEqual(receipt["payload"]["status"], "SUCCEEDED")
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+    def test_d106_executor_rechecks_argument_binding_when_runtime_is_bypassed(self):
+        # The reviewer's key question: a caller bypasses the Runtime and invokes
+        # the Executor directly with a v2 authorization signed for INV-100 but a
+        # binding/dispatch for INV-999. The Executor must re-verify at dispatch.
+        authorization = self._make_executor_authorization(
+            arguments={"invoice_id": "INV-100"}
+        )
+        args = {"invoice_id": "INV-999"}
+        binding = self._binding(args)
+        request_digest = executor_admission_digest(binding.binding_digest, authorization)
+        self.adapter.consume_for_grant(
+            self.execution, operation_id=binding.operation_id, request_digest=request_digest,
+        )
+        budget_receipt = self.adapter.coordinator_receipt_for_operation(binding.operation_id)
+        with self.assertRaises(ToolExecutionDenied):
+            self.executor.execute(
+                binding=binding, arguments=args, online_lease_grant=self.lease,
+                execution_grant=self.execution, budget_receipt=budget_receipt,
+                executor_authorization=authorization,
+            )
+        self.assertIsNone(self.executor.store.get_receipt(binding.operation_id))
 
 if __name__ == "__main__":
     unittest.main()

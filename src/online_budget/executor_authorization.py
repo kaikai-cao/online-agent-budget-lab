@@ -13,18 +13,24 @@ from .grants import (
     GrantError, OnlineLeaseGrant, execution_grant_digest,
     validate_execution_grant_v2, verify_online_lease_grant,
 )
+# D10.6: reuse the existing ToolCallBinding argument digest and canonicalization
+# version. Never let a caller supply a precomputed digest.
+from .tool_binding import CANONICALIZATION_VERSION, arguments_digest
 
 
 class ExecutorAuthorizationError(GrantError):
     """Issuer-signed authorization for one exact Executor/tool operation."""
 
 
-_PAYLOAD_FIELDS = {
+_PAYLOAD_FIELDS_V1 = {
     "version", "issuer_id", "authorization_id", "lease_id", "operation_id",
     "execution_grant_digest", "gateway_id", "coordinator_id", "global_budget_id",
     "context_digest", "executor_id", "executor_public_key_b64",
     "executor_public_key_digest", "tool_name", "tool_schema_hash",
     "issued_at", "expires_at",
+}
+_PAYLOAD_FIELDS_V2 = _PAYLOAD_FIELDS_V1 | {
+    "arguments_digest", "canonicalization_version",
 }
 
 _IDENTITY_FIELDS = (
@@ -45,12 +51,18 @@ def _integer(value: Any, field: str) -> None:
 
 
 def _validate_payload_shape(payload: Mapping[str, Any]) -> None:
-    if not isinstance(payload, Mapping) or set(payload) != _PAYLOAD_FIELDS:
-        raise ExecutorAuthorizationError("Executor Authorization v1 schema mismatch")
+    if not isinstance(payload, Mapping):
+        raise ExecutorAuthorizationError("Executor Authorization payload must be an object")
 
-    version = payload["version"]
-    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+    version = payload.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
         raise ExecutorAuthorizationError("unsupported Executor Authorization version")
+
+    expected_fields = _PAYLOAD_FIELDS_V1 if version == 1 else _PAYLOAD_FIELDS_V2
+    if set(payload) != expected_fields:
+        raise ExecutorAuthorizationError(
+            f"Executor Authorization v{version} schema mismatch"
+        )
 
     for field in _IDENTITY_FIELDS:
         _nonempty(payload[field], field)
@@ -61,6 +73,13 @@ def _validate_payload_shape(payload: Mapping[str, Any]) -> None:
     ):
         if not is_sha256(payload[field]):
             raise ExecutorAuthorizationError(f"{field} must be a SHA-256 digest")
+
+    if version == 2:
+        if not is_sha256(payload["arguments_digest"]):
+            raise ExecutorAuthorizationError(
+                "arguments_digest must be a SHA-256 digest"
+            )
+        _nonempty(payload["canonicalization_version"], "canonicalization_version")
 
     _integer(payload["issued_at"], "issued_at")
     _integer(payload["expires_at"], "expires_at")
@@ -148,8 +167,19 @@ def issue_executor_authorization(
     tool_schema_hash: str,
     issued_at: int,
     expires_at: int,
+    arguments: Mapping[str, Any] | None = None,
 ) -> ExecutorAuthorization:
+    """Issue an Executor Authorization.
+
+    Without ``arguments`` this issues a legacy v1 authorization (unchanged).
+    With ``arguments`` this issues v2 and signs the exact argument digest produced
+    by the existing ``tool_binding.arguments_digest`` together with the
+    ``ToolCallBinding`` canonicalization version. Callers cannot supply a digest.
+    """
     try:
+        if arguments is not None and not isinstance(arguments, Mapping):
+            raise ExecutorAuthorizationError("arguments must be a mapping when supplied")
+
         verify_online_lease_grant(
             online_lease_grant, issuer_private_key.public_key()
         )
@@ -236,6 +266,10 @@ def issue_executor_authorization(
             "issued_at": issued_at,
             "expires_at": expires_at,
         }
+        if arguments is not None:
+            payload["version"] = 2
+            payload["arguments_digest"] = arguments_digest(arguments)
+            payload["canonicalization_version"] = CANONICALIZATION_VERSION
         _validate_payload_shape(payload)
         signature = issuer_private_key.sign(canonical_json_bytes(payload))
         return ExecutorAuthorization(payload, b64encode(signature))
@@ -260,7 +294,17 @@ def verify_executor_authorization(
     tool_name: str,
     tool_schema_hash: str,
     now: int,
+    expected_arguments_digest: str | None = None,
+    canonicalization_version: str | None = None,
+    require_argument_binding: bool = False,
 ) -> Ed25519PublicKey:
+    """Verify an Executor Authorization against this exact operation.
+
+    v1 validates the legacy fields only. v2 additionally requires the caller to
+    present the *current request's* argument digest and canonicalization version;
+    a correctly signed v2 payload is not sufficient for acceptance. Setting
+    ``require_argument_binding`` makes v1 fail closed.
+    """
     try:
         auth = (
             authorization
@@ -274,6 +318,32 @@ def verify_executor_authorization(
             raise ExecutorAuthorizationError("authorization signature is missing")
 
         verify_signature(issuer_public_key, auth.signature_b64, payload)
+
+        version = payload["version"]
+        if require_argument_binding and version != 2:
+            raise ExecutorAuthorizationError(
+                "argument-level binding required but Executor Authorization is v1"
+            )
+        if version == 2:
+            # A valid v2 signature alone is not enough: the signed digest must
+            # equal the digest of the request actually being authorized now.
+            if not is_sha256(expected_arguments_digest):
+                raise ExecutorAuthorizationError(
+                    "expected_arguments_digest is required to verify v2"
+                )
+            if not isinstance(canonicalization_version, str) or not canonicalization_version:
+                raise ExecutorAuthorizationError(
+                    "canonicalization_version is required to verify v2"
+                )
+            if payload["arguments_digest"] != expected_arguments_digest:
+                raise ExecutorAuthorizationError(
+                    "arguments digest in Executor Authorization differs from the current request"
+                )
+            if payload["canonicalization_version"] != canonicalization_version:
+                raise ExecutorAuthorizationError(
+                    "canonicalization version in Executor Authorization differs from the current request"
+                )
+
         verify_online_lease_grant(online_lease_grant, issuer_public_key)
         execution = validate_execution_grant_v2(
             execution_grant, issuer_public_key

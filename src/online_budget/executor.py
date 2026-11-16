@@ -147,12 +147,23 @@ class TrustedToolExecutor:
                 )
             return
         try:
+            # D10.6: re-check at this dispatch/preflight boundary using the
+            # CURRENT ToolCallBinding, so bypassing the Runtime cannot reuse a
+            # v2 authorization signed for a different argument set. A v2
+            # authorization is only accepted when its signed argument digest and
+            # canonicalization version equal this binding's values. Under the
+            # authorization_required policy v1 (no argument binding) fails closed.
             authorized_key = verify_executor_authorization(
                 executor_authorization, self.issuer_public_key,
                 online_lease_grant=online_grant, execution_grant=execution_grant,
                 gateway_id=binding.gateway_id, coordinator_id=binding.coordinator_id,
                 executor_id=self.executor_id, tool_name=binding.tool_name,
                 tool_schema_hash=binding.tool_schema_hash, now=int(self.clock()),
+                expected_arguments_digest=binding.arguments_digest,
+                canonicalization_version=binding.canonicalization_version,
+                require_argument_binding=(
+                    self._authorization_policy == "authorization_required"
+                ),
             )
         except ExecutorAuthorizationError as exc:
             raise ToolExecutionDenied(f"Executor Authorization rejected: {exc}") from exc

@@ -56,12 +56,20 @@ class AgentToolRuntime:
         admission_digest = binding.binding_digest
         if self.executor_authorization is not None:
             try:
+                # D10.6: verify against this exact binding's argument digest and
+                # canonicalization version BEFORE budget admission. A v2
+                # authorization signed for INV-100 cannot authorize INV-999.
                 authorized_key = verify_executor_authorization(
                     self.executor_authorization, self.gateway_adapter.issuer_public_key,
                     online_lease_grant=self.online_lease_grant, execution_grant=self.execution_grant,
                     gateway_id=self.gateway_adapter.client.gateway_id,
                     coordinator_id=self.gateway_adapter.coordinator_id, executor_id=self.executor_id,
                     tool_name=tool_name, tool_schema_hash=schema_hash, now=int(self.executor.clock()),
+                    expected_arguments_digest=binding.arguments_digest,
+                    canonicalization_version=binding.canonicalization_version,
+                    require_argument_binding=(
+                        self.executor.authorization_policy == "authorization_required"
+                    ),
                 )
                 if public_key_bytes(authorized_key) != public_key_bytes(self.executor.executor_private_key.public_key()):
                     raise ToolExecutionDenied("Executor Authorization names a different Executor key")
