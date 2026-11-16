@@ -1,0 +1,16 @@
+[package]
+name = "d11_3_c_coordinator"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[dependencies]
+halo2_proofs = { version = "=0.4.0", default-features = false, features = ["batch", "floor-planner-v1-legacy-pdqsort"] }
+d11_3_b_state_transition = { path = "../d11_3_b_state_transition" }
+rusqlite = { version = "=0.38.0", features = ["bundled"] }
+ed25519-dalek = "=2.2.0"
+# B.1's Pallas Fp implements `ff` 0.14 (pasta_curves 0.6.3 / halo2_proofs 0.4.0).
+# The task package suggested 0.13.1, but that trait version cannot be used with
+# this Fp. No Halo2 version is changed.
+ff = "=0.14.0"
+rand = { version = "=0.10.4", default-features = false, features = ["sys_rng"] }
