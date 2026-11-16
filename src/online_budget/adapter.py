@@ -59,6 +59,9 @@ class OnlineBudgetExecutionAdapter:
     ) -> None:
         if client.coordinator_id != coordinator_id:
             raise ValueError("client and adapter Coordinator identities differ")
+        # D9.3.1: a Client pinned to another budget epoch cannot back this Adapter.
+        if client.global_budget_id != global_budget_id:
+            raise ValueError("client and adapter budget epoch identities differ")
         self.client = client
         self.issuer_public_key = issuer_public_key
         self.global_budget_id = global_budget_id

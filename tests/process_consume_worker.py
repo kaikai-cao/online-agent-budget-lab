@@ -27,6 +27,7 @@ def main() -> int:
         gateway_private_key=private_key_from_b64(config["gateway_private_key_b64"]),
         coordinator_public_key=public_key_from_b64(config["coordinator_public_key_b64"]),
         coordinator_id=config["coordinator_id"],
+        global_budget_id=config["global_budget_id"],
     )
     grant = OnlineLeaseGrant.from_dict(config["online_lease_grant"])
     try:

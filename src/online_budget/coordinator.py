@@ -64,6 +64,25 @@ class OnlineBudgetCoordinator:
         self._initialize_meta()
         for gateway_id, public_key in gateways.items():
             self.enroll_gateway(gateway_id, public_key)
+        # D9.3.1: never serve from a database that fails physical or ledger checks.
+        self._startup_integrity_check()
+
+    def _startup_integrity_check(self) -> None:
+        """Fail startup closed on SQLite or Online budget-ledger inconsistency."""
+        try:
+            with self._db() as con:
+                integrity_rows = con.execute("PRAGMA integrity_check").fetchall()
+                integrity = [str(row[0]) for row in integrity_rows]
+                if integrity != ["ok"]:
+                    raise CoordinatorIndeterminate("SQLite integrity_check failed: " + "; ".join(integrity))
+                foreign_key_errors = con.execute("PRAGMA foreign_key_check").fetchall()
+                if foreign_key_errors:
+                    raise CoordinatorIndeterminate("SQLite foreign_key_check reported violations")
+            self.assert_invariants()
+        except CoordinatorIndeterminate:
+            raise
+        except sqlite3.DatabaseError as exc:
+            raise CoordinatorIndeterminate("Coordinator database integrity validation failed") from exc
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.database_path, timeout=30.0, isolation_level=None)
@@ -192,11 +211,12 @@ class OnlineBudgetCoordinator:
             if row is not None and row["key_digest"] != key_digest:
                 con.rollback()
                 raise ConfigurationMismatch("Gateway key rotation requires an explicit enrollment procedure")
-            con.execute(
-                "INSERT INTO gateways(gateway_id,public_key_b64,key_digest,enabled) VALUES(?,?,?,1) "
-                "ON CONFLICT(gateway_id) DO UPDATE SET enabled=1",
-                (gateway_id, b64encode(raw), key_digest),
-            )
+            # D9.3.1: startup enrollment inserts new identities but never re-enables an existing disabled one.
+            if row is None:
+                con.execute(
+                    "INSERT INTO gateways(gateway_id,public_key_b64,key_digest,enabled) VALUES(?,?,?,1)",
+                    (gateway_id, b64encode(raw), key_digest),
+                )
             con.commit()
 
     def gateway_public_key(self, gateway_id: str) -> Ed25519PublicKey | None:
@@ -222,11 +242,18 @@ class OnlineBudgetCoordinator:
             raise CoordinatorIndeterminate(row["health_reason"] or "Coordinator is not READY")
         return row
 
-    def _assert_gateway_allowed(self, gateway_id: str, grant: OnlineLeaseGrant) -> None:
+    @staticmethod
+    def _require_gateway_enabled(con: sqlite3.Connection, gateway_id: str) -> None:
+        row = con.execute("SELECT enabled FROM gateways WHERE gateway_id=?", (gateway_id,)).fetchone()
+        if row is None or int(row["enabled"]) != 1:
+            raise GatewayNotAuthorized("Gateway is not enrolled or has been disabled")
+
+    def _assert_gateway_allowed(
+        self, con: sqlite3.Connection, gateway_id: str, grant: OnlineLeaseGrant,
+    ) -> None:
         if gateway_id not in grant.allowed_gateway_ids:
             raise GatewayNotAuthorized("Gateway ID is not listed in the signed Online Lease Grant")
-        if self.gateway_public_key(gateway_id) is None:
-            raise GatewayNotAuthorized("Gateway is not enrolled or has been disabled")
+        self._require_gateway_enabled(con, gateway_id)
 
     def register_lease(self, gateway_id: str, grant: OnlineLeaseGrant) -> dict[str, Any]:
         try:
@@ -235,11 +262,11 @@ class OnlineBudgetCoordinator:
             raise GrantRejected(str(exc)) from exc
         if grant.global_budget_id != self.global_budget_id or grant.coordinator_audience != self.coordinator_id:
             raise GrantRejected("Online Lease Grant belongs to another epoch or Coordinator")
-        self._assert_gateway_allowed(gateway_id, grant)
         with self._db() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
                 self._assert_ready(con)
+                self._assert_gateway_allowed(con, gateway_id, grant)
                 row = con.execute("SELECT * FROM leases WHERE lease_id=?", (grant.lease_id,)).fetchone()
                 if row is not None:
                     if row["grant_digest"] != grant.grant_digest:
@@ -284,6 +311,22 @@ class OnlineBudgetCoordinator:
             row = con.execute("SELECT * FROM leases WHERE lease_id=?", (lease_id,)).fetchone()
         return None if row is None else self._lease_row(row)
 
+    def get_lease_for_gateway(self, gateway_id: str, lease_id: str) -> dict[str, Any] | None:
+        """Read Lease metadata only while the caller remains an enabled Gateway."""
+        with self._db() as con:
+            con.execute("BEGIN")
+            self._require_gateway_enabled(con, gateway_id)
+            row = con.execute("SELECT * FROM leases WHERE lease_id=?", (lease_id,)).fetchone()
+            if row is None:
+                con.commit()
+                return None
+            allowed = json.loads(row["allowed_gateway_ids_json"])
+            if gateway_id not in allowed:
+                raise GatewayNotAuthorized("Gateway is not authorized to inspect this Lease")
+            result = self._lease_row(row)
+            con.commit()
+            return result
+
     def revoke_lease(self, gateway_id: str, record: LeaseRevocation) -> dict[str, Any]:
         try:
             verify_revocation(record, self.issuer_public_key)
@@ -291,12 +334,11 @@ class OnlineBudgetCoordinator:
             raise GrantRejected(str(exc)) from exc
         if record.global_budget_id != self.global_budget_id:
             raise GrantRejected("revocation targets another budget epoch")
-        if self.gateway_public_key(gateway_id) is None:
-            raise GatewayNotAuthorized("Gateway is not enrolled or has been disabled")
         with self._db() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
                 self._assert_ready(con)
+                self._require_gateway_enabled(con, gateway_id)
                 old = con.execute("SELECT * FROM revocations WHERE revocation_id=?", (record.revocation_id,)).fetchone()
                 if old is not None:
                     if old["revocation_digest"] != record.revocation_digest:
@@ -364,11 +406,11 @@ class OnlineBudgetCoordinator:
             raise GrantRejected("request_digest must be a sha256 digest")
         exec_digest = self._pair_grants(gateway_id, online_grant, execution, self.coordinator_id)
         grant_digest = online_grant.grant_digest
-        self._assert_gateway_allowed(gateway_id, online_grant)
         with self._db() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
                 meta = self._assert_ready(con)
+                self._assert_gateway_allowed(con, gateway_id, online_grant)
                 existing = con.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
                 binding = (gateway_id, online_grant.lease_id, grant_digest, exec_digest, request_digest)
                 if existing is not None:
@@ -458,21 +500,24 @@ class OnlineBudgetCoordinator:
                 raise
 
     def lookup_operation(self, gateway_id: str, operation_id: str) -> BudgetReceipt | None:
-        if self.gateway_public_key(gateway_id) is None:
-            raise GatewayNotAuthorized("Gateway is not enrolled or has been disabled")
         with self._db() as con:
+            con.execute("BEGIN")
+            self._require_gateway_enabled(con, gateway_id)
             row = con.execute(
                 "SELECT o.gateway_id,r.receipt_json,r.signature_b64 FROM operations o "
                 "LEFT JOIN receipts r ON r.operation_id=o.operation_id WHERE o.operation_id=?",
                 (operation_id,),
             ).fetchone()
-        if row is None:
-            return None
-        if row["gateway_id"] != gateway_id:
-            raise OperationBindingConflict("operation_id belongs to another Gateway")
-        if row["receipt_json"] is None:
-            raise CoordinatorIndeterminate("operation receipt is missing")
-        return BudgetReceipt(json.loads(row["receipt_json"]), row["signature_b64"])
+            if row is None:
+                con.commit()
+                return None
+            if row["gateway_id"] != gateway_id:
+                raise OperationBindingConflict("operation_id belongs to another Gateway")
+            if row["receipt_json"] is None:
+                raise CoordinatorIndeterminate("operation receipt is missing")
+            receipt = BudgetReceipt(json.loads(row["receipt_json"]), row["signature_b64"])
+            con.commit()
+            return receipt
 
     def assert_invariants(self) -> dict[str, int]:
         with self._db() as con:

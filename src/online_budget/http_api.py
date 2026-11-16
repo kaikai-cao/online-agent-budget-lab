@@ -21,14 +21,15 @@ class CoordinatorHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, server_address, coordinator):
         host = server_address[0]
+        # D9.3.1: do not accept hostnames; validate the exact IP literal passed to bind().
         try:
             loopback = ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            loopback = isinstance(host, str) and host.lower() == "localhost"
+        except (ValueError, TypeError):
+            loopback = False
         if not loopback:
             raise ValueError(
-                "built-in Coordinator HTTP server is loopback-only; use a TLS reverse proxy "
-                "and forward to 127.0.0.1"
+                "built-in Coordinator HTTP server requires an explicit loopback IP literal; "
+                "use a TLS reverse proxy for remote Gateways"
             )
         self.coordinator = coordinator
         super().__init__(server_address, CoordinatorRequestHandler)
@@ -141,12 +142,9 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
             return c.revoke_lease(gateway_id, record)
         if path == "/v1/leases/lookup":
             lease_id = payload["lease_id"]
-            lease = c.get_lease(lease_id)
+            lease = c.get_lease_for_gateway(gateway_id, lease_id)
             if lease is None:
                 return {"found": False}
-            if gateway_id not in lease["allowed_gateway_ids"]:
-                from .errors import GatewayNotAuthorized
-                raise GatewayNotAuthorized("Gateway is not authorized to inspect this Lease")
             return {"found": True, **lease}
         if path == "/v1/budget/consume":
             grant = OnlineLeaseGrant.from_dict(payload["online_lease_grant"])

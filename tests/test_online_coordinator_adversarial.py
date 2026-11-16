@@ -5,6 +5,7 @@ import hashlib
 import json
 from http.server import ThreadingHTTPServer
 import socket
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -18,8 +19,8 @@ from urllib.request import Request, urlopen
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from online_budget import (
-    ConfigurationMismatch, CoordinatorHTTPServer, CoordinatorIndeterminate,
-    CoordinatorUnavailable, GlobalBudgetExceeded, LeaseCapExceeded, LeaseInactive,
+    AuthenticationError, ConfigurationMismatch, CoordinatorHTTPServer, CoordinatorIndeterminate,
+    CoordinatorUnavailable, GatewayNotAuthorized, GlobalBudgetExceeded, LeaseCapExceeded, LeaseInactive,
     OnlineBudgetClient, OnlineBudgetCoordinator, OnlineLeaseGrant,
     ToolPermission, issue_online_lease_grant, issue_revocation,
 )
@@ -145,6 +146,7 @@ class OnlineCoordinatorAdversarialTests(unittest.TestCase):
             gateway_private_key=private_key,
             coordinator_public_key=self.coordinator_private.public_key(),
             coordinator_id=self.COORDINATOR_ID,
+            global_budget_id=self.BUDGET_ID,
             timeout_seconds=timeout,
         )
 
@@ -227,6 +229,7 @@ class OnlineCoordinatorAdversarialTests(unittest.TestCase):
         config = {
             "base_url": self.base_url,
             "coordinator_id": self.COORDINATOR_ID,
+            "global_budget_id": self.BUDGET_ID,
             "gateway_id": "gateway-A",
             "gateway_private_key_b64": b64encode(private_key_bytes(self.gateway_a_private)),
             "coordinator_public_key_b64": b64encode(public_key_bytes(self.coordinator_private.public_key())),
@@ -558,6 +561,143 @@ class OnlineCoordinatorAdversarialTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             CoordinatorHTTPServer(("0.0.0.0", 0), self.coordinator)
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+
+    def test_disabled_gateway_stays_disabled_after_restart_and_denies_mutations(self):
+        lease = self.make_lease("lease-disabled-persist")
+        self.register(lease)
+        self.coordinator.disable_gateway("gateway-A")
+
+        # Reconstructing the Coordinator must not turn the persisted disabled flag back on.
+        self.coordinator = self.make_coordinator()
+        self.server.coordinator = self.coordinator
+        self.assertIsNone(self.coordinator.gateway_public_key("gateway-A"))
+
+        execution = self.make_execution(lease, "disabled-consume-op")
+        with self.assertRaises(GatewayNotAuthorized):
+            self.coordinator.consume("gateway-A", lease, execution, operation_id="disabled-consume-op",
+                                    request_digest=digest({"disabled": "consume"}))
+        new_lease = self.make_lease("lease-disabled-register")
+        with self.assertRaises(GatewayNotAuthorized):
+            self.coordinator.register_lease("gateway-A", new_lease)
+        revocation = issue_revocation(
+            self.issuer_private, issuer_id=lease.issuer_id, global_budget_id=self.BUDGET_ID,
+            revocation_id="revocation-disabled-gateway", lease_id=lease.lease_id,
+            grant_digest=lease.grant_digest, revoked_at=self.now[0],
+        )
+        with self.assertRaises(GatewayNotAuthorized):
+            self.coordinator.revoke_lease("gateway-A", revocation)
+        with self.assertRaises(AuthenticationError):
+            self.client().lookup_operation("disabled-consume-op")
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_gateway_disable_serializes_after_an_admitted_consume(self):
+        lease = self.make_lease("lease-disable-consume-order")
+        self.register(lease)
+        operation_id = "disable-after-admission-op"
+        execution = self.make_execution(lease, operation_id)
+        request_digest = digest({"disable-order": operation_id})
+        entered = threading.Event()
+        release = threading.Event()
+        disable_started = threading.Event()
+        original_check = self.coordinator._assert_gateway_allowed
+
+        def paused_check(con, gateway_id, grant):
+            original_check(con, gateway_id, grant)
+            entered.set()
+            if not release.wait(timeout=10):
+                raise TimeoutError("test gate timed out")
+
+        self.coordinator._assert_gateway_allowed = paused_check
+        def disable():
+            disable_started.set()
+            self.coordinator.disable_gateway("gateway-A")
+
+        pool = ThreadPoolExecutor(max_workers=2)
+        consume_future = pool.submit(
+            self.coordinator.consume, "gateway-A", lease, execution,
+            operation_id=operation_id, request_digest=request_digest,
+        )
+        disable_future = None
+        try:
+            self.assertTrue(entered.wait(5), "consume did not reach in-transaction Gateway check")
+            disable_future = pool.submit(disable)
+            self.assertTrue(disable_started.wait(3))
+            time.sleep(0.1)
+            self.assertFalse(disable_future.done(), "disable should wait behind the active consume transaction")
+            release.set()
+            receipt = consume_future.result(timeout=10)
+            disable_future.result(timeout=10)
+        finally:
+            release.set()
+            self.coordinator._assert_gateway_allowed = original_check
+            pool.shutdown(wait=True, cancel_futures=True)
+        self.assertEqual(receipt.payload["global_sequence"], 1)
+        self.assertIsNone(self.coordinator.gateway_public_key("gateway-A"))
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+    def test_startup_fails_closed_on_ledger_invariant_corruption(self):
+        lease = self.make_lease("lease-startup-corrupt")
+        self.register(lease)
+        self.consume(lease, "startup-corrupt-op")
+        corrupt = sqlite3.connect(self.root / "coordinator.sqlite3")
+        try:
+            corrupt.execute("UPDATE budget_meta SET global_used_count=0 WHERE singleton_id=1")
+            corrupt.commit()
+        finally:
+            corrupt.close()
+
+        with self.assertRaises(CoordinatorIndeterminate):
+            self.make_coordinator()
+
+    def test_operation_lookup_rejects_wrong_coordinator_or_budget_epoch(self):
+        lease = self.make_lease("lease-lookup-pinning")
+        self.register(lease)
+        self.consume(lease, "lookup-pinning-op")
+        common = {
+            "base_url": self.base_url, "gateway_id": "gateway-A",
+            "gateway_private_key": self.gateway_a_private,
+            "coordinator_public_key": self.coordinator_private.public_key(),
+        }
+        wrong_coordinator = OnlineBudgetClient(
+            **common, coordinator_id="coordinator-impostor", global_budget_id=self.BUDGET_ID,
+        )
+        with self.assertRaises(CoordinatorIndeterminate):
+            wrong_coordinator.lookup_operation("lookup-pinning-op")
+        wrong_epoch = OnlineBudgetClient(
+            **common, coordinator_id=self.COORDINATOR_ID, global_budget_id="other-budget-epoch",
+        )
+        with self.assertRaises(CoordinatorIndeterminate):
+            wrong_epoch.lookup_operation("lookup-pinning-op")
+
+    def test_adapter_rejects_client_pinned_to_another_budget_epoch(self):
+        wrong_epoch_client = OnlineBudgetClient(
+            base_url=self.base_url, gateway_id="gateway-A",
+            gateway_private_key=self.gateway_a_private,
+            coordinator_public_key=self.coordinator_private.public_key(),
+            coordinator_id=self.COORDINATOR_ID, global_budget_id="wrong-epoch",
+        )
+        from online_budget import OnlineBudgetExecutionAdapter
+        with self.assertRaises(ValueError):
+            OnlineBudgetExecutionAdapter(
+                client=wrong_epoch_client, issuer_public_key=self.issuer_private.public_key(),
+                global_budget_id=self.BUDGET_ID, global_quota_limit=10,
+                coordinator_id=self.COORDINATOR_ID, receipt_cache_path=self.root / "wrong-epoch-cache.sqlite3",
+            )
+
+    def test_http_server_rejects_hostname_bind_and_chunked_transfer_encoding(self):
+        with self.assertRaises(ValueError):
+            CoordinatorHTTPServer(("localhost", 0), self.coordinator)
+        response = self._raw_http_request(
+            b"POST /v1/budget/consume HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            b"2\r\n{}\r\n0\r\n\r\n"
+        )
+        self.assertIn(b" 400 ", response.split(b"\r\n", 1)[0])
+        self.assertIn(b"Connection: close", response)
         self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
 
 

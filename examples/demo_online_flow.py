@@ -25,6 +25,7 @@ def main() -> int:
         gateway_private_key=gateway_private,
         coordinator_public_key=coordinator_private.public_key(),
         coordinator_id=config["coordinator_id"],
+        global_budget_id=config["global_budget_id"],
     )
     now = int(time.time())
     context_digest = digest({"tenant_id": "tenant-demo", "purpose": "invoice-review"})

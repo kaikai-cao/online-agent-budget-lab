@@ -84,6 +84,7 @@ class OnlineCoordinatorTests(unittest.TestCase):
             gateway_private_key=key,
             coordinator_public_key=self.coordinator_private.public_key(),
             coordinator_id=self.COORDINATOR_ID,
+            global_budget_id=self.BUDGET_ID,
         )
 
     def make_lease(self, lease_id: str, *, quota: int = 4, allowed=("gateway-A", "gateway-B"), expires_delta=3600):
@@ -176,6 +177,7 @@ class OnlineCoordinatorTests(unittest.TestCase):
             cfg = {
                 "base_url": self.base_url,
                 "coordinator_id": self.COORDINATOR_ID,
+                "global_budget_id": self.BUDGET_ID,
                 "gateway_id": gateway_id,
                 "gateway_private_key_b64": b64encode(private_key_bytes(private_key)),
                 "coordinator_public_key_b64": b64encode(public_key_bytes(self.coordinator_private.public_key())),
@@ -314,7 +316,8 @@ class OnlineCoordinatorTests(unittest.TestCase):
             base_url="http://127.0.0.1:1", gateway_id="gateway-A",
             gateway_private_key=self.gateway_a_private,
             coordinator_public_key=self.coordinator_private.public_key(),
-            coordinator_id=self.COORDINATOR_ID, timeout_seconds=0.2,
+            coordinator_id=self.COORDINATOR_ID,
+            global_budget_id=self.BUDGET_ID, timeout_seconds=0.2,
         )
         with self.assertRaises(CoordinatorUnavailable):
             client.lookup_operation("no-op")

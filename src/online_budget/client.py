@@ -38,14 +38,18 @@ class CoordinatorUnavailable(RuntimeError):
 class OnlineBudgetClient:
     def __init__(
         self, *, base_url: str, gateway_id: str, gateway_private_key: Ed25519PrivateKey,
-        coordinator_public_key: Ed25519PublicKey, coordinator_id: str,
+        coordinator_public_key: Ed25519PublicKey, coordinator_id: str, global_budget_id: str,
         timeout_seconds: float = 5.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.gateway_id = gateway_id
         if not coordinator_id or not coordinator_id.strip():
             raise ValueError("coordinator_id must be non-empty")
+        # D9.3.1: pin the budget epoch as part of the client's trust configuration.
+        if not isinstance(global_budget_id, str) or not global_budget_id.strip():
+            raise ValueError("global_budget_id must be non-empty")
         self.coordinator_id = coordinator_id
+        self.global_budget_id = global_budget_id
         self.gateway_private_key = gateway_private_key
         self.coordinator_public_key = coordinator_public_key
         self.timeout_seconds = timeout_seconds
@@ -132,6 +136,12 @@ class OnlineBudgetClient:
         if not result.get("found"):
             return None
         receipt = BudgetReceipt.from_dict(result["receipt"])
-        if not verify_budget_receipt(receipt, self.coordinator_public_key, expected={"gateway_id": self.gateway_id, "operation_id": operation_id}):
-            raise CoordinatorIndeterminate("stored Coordinator receipt failed verification")
+        expected = {
+            "coordinator_id": self.coordinator_id,
+            "global_budget_id": self.global_budget_id,
+            "gateway_id": self.gateway_id,
+            "operation_id": operation_id,
+        }
+        if not verify_budget_receipt(receipt, self.coordinator_public_key, expected=expected):
+            raise CoordinatorIndeterminate("stored Coordinator receipt failed identity or binding verification")
         return receipt
