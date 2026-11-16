@@ -1,15 +1,56 @@
+
 # Online Agent Budget Lab
 
-A standalone research repository for the Online Global Budget Coordination work (D9).
+A standalone research prototype for single-node Online Global Budget Coordination (D9).
 
-## Current status
+## Project status
 
-- **D9.0:** design decisions accepted as the D9.1 reference-model baseline.
-- **D9.1:** single-node HTTP Coordinator, SQLite WAL ledger, Online Lease Grant v4, Gateway request authentication, signed Budget Receipts, HTTP client and E4.8.3-compatible Online adapter implemented as a reference model.
-- **D9.1 local validation:** 15 tests pass, including independent Gateway OS processes racing for the final global budget unit.
-- **Offline baseline:** maintained separately in [`kaikai-cao/offline-agent-budget-lab`](https://github.com/kaikai-cao/offline-agent-budget-lab), frozen at commit `10577ab5d53181aef522b7c8f920e4dc7251a124`.
+The repository implements and validates a single-node Online Budget Coordinator and an E4.8.3-compatible Gateway adapter.
 
-D9.1 is not a replicated or production-ready service. The Coordinator must be the sole authority for new consumption; the client has no local spending fallback.
+| Stage | Result |
+|---|---|
+| D9.0 — Design baseline | Completed |
+| D9.1 — Single-node Coordinator implementation | Completed |
+| D9.2 — Adversarial and recovery tests | Completed |
+| D9.3 — Security boundary review | Completed |
+| D9.3.1 — Bounded hardening | Completed |
+| D9.4 — Online v1 integration acceptance | Acceptance recorded; see the D9.4 report |
+
+Current validated baseline: `69dac31` (`fix: harden single-node online budget coordinator`).
+
+The D9.4 validation run on the Windows development environment reported **31 tests passing**. It also completed a separate HTTP smoke test using an isolated worktree, generated development keys, and a temporary SQLite database.
+
+This is a research reference implementation, not a production-ready distributed service.
+
+## Architecture
+
+- One logical Coordinator process owns the authoritative SQLite WAL ledger.
+- Gateways communicate with the Coordinator over the HTTP API. Gateways do not access the authoritative database directly.
+- Online Lease Grant v4 and Execution Grant v2 are Issuer-signed.
+- Gateway requests are authenticated using Ed25519.
+- The Coordinator atomically admits new budget consumption and issues signed Budget Receipts.
+- The Gateway-side Online adapter verifies and caches Coordinator receipts and can construct a receipt chain linking a Gateway execution receipt to a Coordinator budget receipt.
+
+The Coordinator is the authority for **new** budget consumption. If it is unavailable, a new operation cannot obtain a budget authorization. An exact replay of an already committed operation may be served from a locally cached, verified receipt.
+
+## Core accounting invariants
+
+For each Lease \(i\):
+
+- `0 <= U_i <= Q_i`
+- `S = SUM(U_i)`
+- `0 <= S <= G`
+
+Where:
+
+- `U_i` is the committed usage of Lease `i`.
+- `Q_i` is the Lease quota.
+- `S` is the global committed usage.
+- `G` is the global budget limit.
+
+Each committed operation consumes one unit. The operation record count and receipt count must match committed global usage, and global sequence numbers must be unique and contiguous.
+
+Lease quotas are per-Lease hard caps, not global reservations. The sum of Lease quota limits may exceed the global budget limit.
 
 ## Repository layout
 
@@ -26,71 +67,89 @@ online-agent-budget-lab/
 │   └── demo_online_flow.py
 ├── src/
 │   └── online_budget/
-│       ├── adapter.py
-│       ├── auth.py
-│       ├── canonical.py
-│       ├── client.py
-│       ├── coordinator.py
-│       ├── errors.py
-│       ├── grants.py
-│       ├── http_api.py
-│       ├── receipt_chain.py
-│       └── receipts.py
 ├── tests/
-│   ├── process_consume_worker.py
-│   └── test_online_coordinator.py
 └── docs/
-    ├── D9.0_ONLINE_GLOBAL_BUDGET_DESIGN.md
-    └── D9.1_SINGLE_NODE_COORDINATOR_IMPLEMENTATION.md
 ```
 
-## Quick start (local development only)
+## Local development
 
 Python 3.10+ is required.
 
+Install dependencies:
+
 ```powershell
 python -m pip install -r requirements.txt
+```
+
+Generate development configuration and keys:
+
+```powershell
 python scripts/create_dev_config.py
+```
+
+Start the Coordinator:
+
+```powershell
 python run_coordinator.py --config coordinator-config.json --host 127.0.0.1 --port 8765
 ```
 
-In a second PowerShell window:
+In a second PowerShell window, run the HTTP demonstration:
 
 ```powershell
 python examples/demo_online_flow.py
 ```
 
-The demonstration registers an Issuer-signed v4 Lease Grant, sends an authenticated consume request, and verifies the Coordinator-signed Budget Receipt.
+The demonstration exercises the HTTP Coordinator and Client path: Lease Grant registration, authenticated budget consumption, receipt retrieval, and Coordinator receipt signature verification. It does **not** invoke an external tool or demonstrate a complete Agent tool-execution workflow.
 
-The development configuration writes `coordinator-config.json` and `dev-client-keys.json`. They contain private keys and are excluded by `.gitignore`. They are test-only keys and must never be committed or reused.
+The generated `coordinator-config.json` and `dev-client-keys.json` contain private development keys. They are test-only, git-ignored, and must never be committed or reused.
 
 ## Run tests
 
-Preferred PowerShell entry point (sets the `src` import path automatically):
+Preferred PowerShell entry point:
 
 ```powershell
 .\run-tests.ps1
 ```
 
-Equivalent direct command from the repository root:
+Equivalent direct command:
 
 ```powershell
 $env:PYTHONPATH = (Join-Path (Get-Location) "src")
 python -m unittest discover -s tests -v
 ```
 
-Expected D9.1 reference-model result: **15 tests pass**.
+The D9.4 Windows acceptance run completed with:
 
-## Security and deployment boundary
+```text
+Ran 31 tests
+OK
+```
 
-- One logical Coordinator process owns the authoritative SQLite WAL database. Gateways communicate over HTTP and never open the database file.
-- SQLite WAL is local to the Coordinator host; do not put the database on a network share or have remote Gateways access it directly.
-- The built-in HTTP server is for local development. Any non-loopback deployment must use TLS termination and a hardened network boundary.
-- Gateway authentication uses Ed25519 signatures over the HTTP method, exact path and canonical request payload. Exact replays are safe only because state-changing operations are idempotent and operation IDs are bound to immutable request tuples.
-- The Coordinator verifies Issuer signatures on Online Lease Grant v4 and Execution Grant v2. It signs Budget Receipts; the adapter verifies them before returning a budget-confirmed result.
-- The Online adapter persists verified Coordinator receipts in a Gateway-local SQLite cache. An exact, already-committed operation can be resumed from that cache during a Coordinator outage; an operation without a cached signed receipt cannot spend while the Coordinator is unavailable.
-- `build_receipt_chain()` creates an additional Gateway signature linking the Coordinator Budget Receipt to the E4.8.3 execution receipt without modifying the frozen Offline repository.
-- `quota_limit` in Online v1 is a per-Lease cap, not a global reservation. `SUM(quota_limit)` may exceed `G`; only committed usage is charged against the global cap.
-- This prototype does not implement Coordinator replication, HA, consensus, key rotation, rate limiting, TLS itself, TPM/TEE, multi-region writes, fair scheduling, variable-cost operations or arbitrary external-tool exactly-once effects.
+The run was performed with:
 
-See [`docs/D9.0_ONLINE_GLOBAL_BUDGET_DESIGN.md`](docs/D9.0_ONLINE_GLOBAL_BUDGET_DESIGN.md) and [`docs/D9.1_SINGLE_NODE_COORDINATOR_IMPLEMENTATION.md`](docs/D9.1_SINGLE_NODE_COORDINATOR_IMPLEMENTATION.md) for protocol and implementation details.
+```powershell
+$env:PYTHONWARNINGS = "error::ResourceWarning"
+```
+
+No ResourceWarning interrupted the test run. See `docs/D9.4_ONLINE_V1_ACCEPTANCE.md` for the acceptance scope and evidence.
+
+## Security and deployment boundaries
+
+- **Single node only:** this implementation does not provide Coordinator replication, consensus, leader election, or high availability.
+- **Coordinator availability:** new budget consumption fails closed when the Coordinator cannot be reached. There is no local spending fallback.
+- **Database scope:** SQLite WAL is local to the Coordinator host. Do not place the authoritative database on a network share or let remote Gateways open it directly.
+- **HTTP deployment:** the built-in HTTP server is intended for local development and loopback binding. A remote deployment requires a separately hardened network boundary and TLS termination.
+- **Gateway and adapter trust:** the Coordinator authenticates the Gateway and binds an opaque request digest into its operation record and receipt. It does not independently prove that the digest corresponds to a particular tool name, schema, and canonical argument tuple. That semantic validation remains the responsibility of the trusted Gateway/Tool Adapter.
+- **Receipt meaning:** a signed Coordinator receipt attests to the Coordinator's budget admission and recorded request binding. It is not, by itself, proof that an external tool actually executed or produced a particular result.
+- **Rollback boundary:** internal invariant checks can detect many inconsistent database states, but cannot detect restoration of an older, internally consistent database snapshot without an external monotonic anchor.
+- **Key lifecycle:** production-grade key rotation, a complete authenticated administration plane, KMS/HSM integration, and hardware-backed anti-rollback are not implemented.
+- **Other exclusions:** multi-region writes, fair scheduling, variable-cost accounting, refunds, and arbitrary external-tool exactly-once effects are outside the current scope.
+
+The Offline baseline is maintained separately in [`kaikai-cao/offline-agent-budget-lab`](https://github.com/kaikai-cao/offline-agent-budget-lab). This repository does not modify that frozen project.
+
+## Design and acceptance records
+
+- `docs/D9.0_ONLINE_GLOBAL_BUDGET_DESIGN.md` — protocol and design baseline.
+- `docs/D9.1_SINGLE_NODE_COORDINATOR_IMPLEMENTATION.md` — initial implementation record.
+- `docs/D9.3_ONLINE_V1_SECURITY_BOUNDARY_REVIEW.md` — security boundary review and findings.
+- `docs/D9.4_ONLINE_V1_ACCEPTANCE.md` — integration acceptance evidence and freeze assessment.
