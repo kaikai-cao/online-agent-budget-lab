@@ -1,0 +1,9 @@
+[project]
+name = "online-agent-budget-lab"
+version = "0.1.0"
+description = "Single-node Online Global Budget Coordinator reference model"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=41.0"]
+
+[tool.unittest]
+start-directory = "tests"

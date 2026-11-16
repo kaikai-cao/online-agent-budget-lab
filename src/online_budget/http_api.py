@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+from typing import Any
+from urllib.parse import urlparse
+
+from .auth import verify_gateway_envelope
+from .errors import CoordinatorError
+from .grants import LeaseRevocation, OnlineLeaseGrant
+
+MAX_BODY_BYTES = 1_048_576
+
+
+class CoordinatorHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, server_address, coordinator):
+        self.coordinator = coordinator
+        super().__init__(server_address, CoordinatorRequestHandler)
+
+
+class CoordinatorRequestHandler(BaseHTTPRequestHandler):
+    server: CoordinatorHTTPServer
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        # Deployment logging should be configured by the caller. Never log request bodies.
+        return
+
+    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/health":
+            info = self.server.coordinator.inspect()
+            self._send_json(200, {"ok": True, "coordinator_id": info["coordinator_id"],
+                                  "global_budget_id": info["global_budget_id"], "health": info["health"]})
+            return
+        self._send_json(404, {"ok": False, "error": {"code": "NOT_FOUND", "message": "unknown endpoint"}})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path not in {
+            "/v1/leases/register", "/v1/leases/revoke", "/v1/leases/lookup",
+            "/v1/budget/consume", "/v1/budget/lookup",
+        }:
+            self._send_json(404, {"ok": False, "error": {"code": "NOT_FOUND", "message": "unknown endpoint"}})
+            return
+        try:
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                raise ValueError("Content-Length is required")
+            length = int(raw_length)
+            if length < 1 or length > MAX_BODY_BYTES:
+                raise ValueError("request body size is invalid")
+            envelope = json.loads(self.rfile.read(length).decode("utf-8"))
+            gateway_id, payload = verify_gateway_envelope(
+                envelope, method="POST", path=path,
+                gateway_lookup=self.server.coordinator.gateway_public_key,
+            )
+            result = self._dispatch(path, gateway_id, payload)
+            self._send_json(200, {"ok": True, "result": result})
+        except CoordinatorError as exc:
+            self._send_json(exc.http_status, {"ok": False, "error": {"code": exc.code, "message": str(exc)}})
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            self._send_json(400, {"ok": False, "error": {"code": "BAD_REQUEST", "message": str(exc)}})
+        except Exception:
+            # Do not leak stack traces, key material, or database internals over HTTP.
+            self._send_json(500, {"ok": False, "error": {"code": "INTERNAL_ERROR", "message": "internal Coordinator error"}})
+
+    def _dispatch(self, path: str, gateway_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        c = self.server.coordinator
+        if path == "/v1/leases/register":
+            grant = OnlineLeaseGrant.from_dict(payload["grant"])
+            return c.register_lease(gateway_id, grant)
+        if path == "/v1/leases/revoke":
+            record = LeaseRevocation.from_dict(payload["revocation"])
+            return c.revoke_lease(gateway_id, record)
+        if path == "/v1/leases/lookup":
+            lease_id = payload["lease_id"]
+            lease = c.get_lease(lease_id)
+            if lease is None:
+                return {"found": False}
+            if gateway_id not in lease["allowed_gateway_ids"]:
+                from .errors import GatewayNotAuthorized
+                raise GatewayNotAuthorized("Gateway is not authorized to inspect this Lease")
+            return {"found": True, **lease}
+        if path == "/v1/budget/consume":
+            grant = OnlineLeaseGrant.from_dict(payload["online_lease_grant"])
+            receipt = c.consume(
+                gateway_id, grant, payload["execution_grant"],
+                operation_id=payload["operation_id"], request_digest=payload["request_digest"],
+            )
+            return receipt.as_dict()
+        if path == "/v1/budget/lookup":
+            receipt = c.lookup_operation(gateway_id, payload["operation_id"])
+            return {"found": receipt is not None, "receipt": receipt.as_dict() if receipt else None}
+        raise ValueError("unhandled endpoint")
+
+
+def serve(coordinator, host: str = "127.0.0.1", port: int = 8765) -> None:
+    server = CoordinatorHTTPServer((host, port), coordinator)
+    try:
+        server.serve_forever(poll_interval=0.25)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+coordinator-config.json
+dev-client-keys.json
+state/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
