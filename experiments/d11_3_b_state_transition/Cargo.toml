@@ -1,0 +1,11 @@
+[package]
+name = "d11_3_b_state_transition"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[dependencies]
+halo2_proofs = { version = "=0.4.0", default-features = false, features = ["batch", "floor-planner-v1-legacy-pdqsort"] }
+halo2_gadgets = { version = "=0.6.0", default-features = false }
+rand = { version = "=0.10.4", default-features = false, features = ["sys_rng"] }
+rand_core = "=0.10.1"
