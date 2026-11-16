@@ -30,6 +30,13 @@ class AgentToolRuntime:
         self.executor_authorization = executor_authorization
 
     def run_tool_call(self, *, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        if (
+            self.executor.authorization_policy == "authorization_required"
+            and self.executor_authorization is None
+        ):
+            raise ToolExecutionDenied(
+                "Executor Authorization is required by executor policy"
+            )
         operation_id = self.execution_grant["operation_id"]
         # Detach planner-owned nested objects before any network call. This exact
         # snapshot is used to build the binding and later passed to dispatch.

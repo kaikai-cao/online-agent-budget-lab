@@ -80,6 +80,18 @@ class D10ToolExecutionTests(unittest.TestCase):
             database_path=self.root / "executor.sqlite3", registry=self.registry, clock=lambda: self.now[0],
         )
 
+    def _executor_for_policy(self, policy):
+        return TrustedToolExecutor(
+            executor_id=self.EXECUTOR_ID,
+            issuer_public_key=self.issuer_key.public_key(),
+            coordinator_public_key=self.coordinator_key.public_key(),
+            executor_private_key=self.executor_key,
+            database_path=self.root / f"executor-{policy}.sqlite3",
+            registry=self.registry,
+            clock=lambda: self.now[0],
+            authorization_policy=policy,
+        )
+
     def _stop_server(self):
         if getattr(self, "server", None) is not None:
             self.server.shutdown()
@@ -422,6 +434,74 @@ class D10ToolExecutionTests(unittest.TestCase):
             runtime.run_tool_call(tool_name="invoice_review", arguments={"invoice_id": "INV-WRONG-EXECUTOR"})
         self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
 
+
+    def test_required_policy_runtime_rejects_missing_authorization_before_budget(self):
+        executor = self._executor_for_policy("authorization_required")
+        runtime = AgentToolRuntime(
+            gateway_adapter=self.adapter,
+            executor=executor,
+            online_lease_grant=self.lease,
+            execution_grant=self.execution,
+            executor_id=self.EXECUTOR_ID,
+        )
+        with self.assertRaisesRegex(ToolExecutionDenied, "required"):
+            runtime.run_tool_call(
+                tool_name="invoice_review",
+                arguments={"invoice_id": "INV-100"},
+            )
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 0)
+
+    def test_required_policy_direct_prepare_rejects_missing_authorization(self):
+        executor = self._executor_for_policy("authorization_required")
+        with self.assertRaisesRegex(ToolExecutionDenied, "required"):
+            executor.prepare_tool_call(
+                binding=self._binding(),
+                arguments={"invoice_id": "INV-100"},
+                online_lease_grant=self.lease,
+                execution_grant=self.execution,
+            )
+
+    def test_required_policy_direct_execute_rejects_missing_authorization(self):
+        executor = self._executor_for_policy("authorization_required")
+        with self.assertRaisesRegex(ToolExecutionDenied, "required"):
+            executor.execute(
+                binding=self._binding(),
+                arguments={"invoice_id": "INV-100"},
+                online_lease_grant=self.lease,
+                execution_grant=self.execution,
+                budget_receipt={},
+            )
+
+    def test_required_policy_accepts_valid_authorization(self):
+        executor = self._executor_for_policy("authorization_required")
+        binding = self._binding()
+        authorization = self._make_executor_authorization()
+        request_digest = executor_admission_digest(
+            binding.binding_digest, authorization
+        )
+        self.adapter.consume_for_grant(
+            self.execution,
+            operation_id=binding.operation_id,
+            request_digest=request_digest,
+        )
+        budget_receipt = self.adapter.coordinator_receipt_for_operation(
+            binding.operation_id
+        )
+        receipt = executor.execute(
+            binding=binding,
+            arguments={"invoice_id": "INV-100"},
+            online_lease_grant=self.lease,
+            execution_grant=self.execution,
+            budget_receipt=budget_receipt,
+            executor_authorization=authorization,
+        )
+        self.assertTrue(executor.verify_receipt(receipt, binding=binding))
+        self.assertEqual(receipt["payload"]["status"], "SUCCEEDED")
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+    def test_unknown_authorization_policy_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._executor_for_policy("unknown-policy")
 
 if __name__ == "__main__":
     unittest.main()

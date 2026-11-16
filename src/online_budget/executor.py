@@ -75,7 +75,10 @@ class TrustedToolExecutor:
         self, *, executor_id: str, issuer_public_key: Ed25519PublicKey,
         coordinator_public_key: Ed25519PublicKey, executor_private_key: Ed25519PrivateKey,
         database_path: str | Path, registry: LocalToolRegistry | None = None, clock=None,
+        authorization_policy: str = "legacy_allowed",
     ) -> None:
+        if authorization_policy not in ("legacy_allowed", "authorization_required"):
+            raise ValueError("authorization_policy must be 'legacy_allowed' or 'authorization_required'")
         if not isinstance(executor_id, str) or not executor_id.strip():
             raise ValueError("executor_id must be non-empty")
         self.executor_id = executor_id
@@ -85,6 +88,11 @@ class TrustedToolExecutor:
         self.registry = registry or LocalToolRegistry()
         self.store = ExecutionStore(database_path)
         self.clock = clock or (lambda: int(time.time()))
+        self._authorization_policy = authorization_policy
+
+    @property
+    def authorization_policy(self) -> str:
+        return self._authorization_policy
 
     def _verify_grant_binding(
         self, binding: ToolCallBinding, online_grant: OnlineLeaseGrant,
@@ -133,6 +141,10 @@ class TrustedToolExecutor:
         # None preserves the pre-D10.4 compatibility path. When a D10.4
         # authorization is supplied, the Executor independently verifies it.
         if executor_authorization is None:
+            if self._authorization_policy == "authorization_required":
+                raise ToolExecutionDenied(
+                    "Executor Authorization is required by executor policy"
+                )
             return
         try:
             authorized_key = verify_executor_authorization(
