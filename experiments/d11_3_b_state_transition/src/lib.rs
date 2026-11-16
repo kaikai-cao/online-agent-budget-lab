@@ -13,10 +13,13 @@
 //! D11.3-B.1 and later work items.
 
 pub mod poseidon_probe;
+pub mod range;
+pub mod state_transition;
 
 pub use poseidon_probe::{
     native_poseidon, PoseidonHashCircuit, PoseidonProbeConfig, K_PROBE, RATE, WIDTH,
 };
+pub use state_transition::{StateTransitionCircuit, StateWitness, INSTANCE_ROWS};
 
 /// Domain-separator for the state commitment `C`.
 ///
