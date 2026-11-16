@@ -19,6 +19,8 @@ from online_budget.executor import LocalToolRegistry, ToolExecutionDenied, Trust
 from online_budget.executor_authorization import (
     executor_admission_digest, issue_executor_authorization,
 )
+from online_budget.execution_receipts import verify_execution_receipt
+from online_budget.receipts import sign_budget_receipt
 from online_budget.tool_binding import (
     CANONICALIZATION_VERSION, ToolCallBinding, arguments_digest,
     build_tool_call_binding, snapshot_arguments,
@@ -311,12 +313,12 @@ class D10ToolExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             arguments_digest({"amount": 1.25})
 
-    def _make_executor_authorization(self, *, executor_public_key=None, tool_name="invoice_review", schema_hash=None, arguments=None):
+    def _make_executor_authorization(self, *, executor_public_key=None, tool_name="invoice_review", schema_hash=None, arguments=None, authorization_id=None):
         # D10.6: arguments=None preserves v1 issuance; supplying arguments
         # issues v2 with the exact argument digest signed in.
         return issue_executor_authorization(
             self.issuer_key, issuer_id=self.lease.issuer_id,
-            authorization_id="auth-" + self.execution["operation_id"],
+            authorization_id=authorization_id or ("auth-" + self.execution["operation_id"]),
             online_lease_grant=self.lease, execution_grant=self.execution,
             gateway_id=self.GATEWAY_ID, coordinator_id=self.COORDINATOR_ID,
             executor_id=self.EXECUTOR_ID,
@@ -612,6 +614,154 @@ class D10ToolExecutionTests(unittest.TestCase):
         )
         self.assertEqual(receipt["payload"]["status"], "SUCCEEDED")
         self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+    def _admit_for_authorization(self, binding, authorization):
+        request_digest = executor_admission_digest(binding.binding_digest, authorization)
+        self.adapter.consume_for_grant(
+            self.execution, operation_id=binding.operation_id, request_digest=request_digest,
+        )
+        return self.adapter.coordinator_receipt_for_operation(binding.operation_id)
+
+    def test_d107_without_authorization_issues_receipt_v1(self):
+        args = {"invoice_id": "INV-D107-V1"}
+        binding = self._binding(args)
+        budget_receipt = self._admit(binding)
+        receipt = self.executor.execute(
+            binding=binding, arguments=args, online_lease_grant=self.lease,
+            execution_grant=self.execution, budget_receipt=budget_receipt,
+        )
+        self.assertEqual(receipt["payload"]["receipt_version"], 1)
+        self.assertNotIn("executor_authorization_digest", receipt["payload"])
+        self.assertTrue(self.executor.verify_receipt(receipt, binding=binding))
+
+    def test_d107_with_v1_authorization_issues_receipt_v2_with_digest(self):
+        args = {"invoice_id": "INV-D107-V1AUTH"}
+        binding = self._binding(args)
+        authorization = self._make_executor_authorization()  # v1 authorization
+        self.assertEqual(authorization.payload["version"], 1)
+        budget_receipt = self._admit_for_authorization(binding, authorization)
+        receipt = self.executor.execute(
+            binding=binding, arguments=args, online_lease_grant=self.lease,
+            execution_grant=self.execution, budget_receipt=budget_receipt,
+            executor_authorization=authorization,
+        )
+        self.assertEqual(receipt["payload"]["receipt_version"], 2)
+        self.assertEqual(
+            receipt["payload"]["executor_authorization_digest"],
+            authorization.authorization_digest,
+        )
+        self.assertTrue(self.executor.verify_receipt(receipt, binding=binding))
+
+    def test_d107_with_v2_authorization_issues_receipt_v2_with_digest(self):
+        args = {"invoice_id": "INV-D107-V2AUTH"}
+        binding = self._binding(args)
+        authorization = self._make_executor_authorization(arguments=args)  # v2 authorization
+        self.assertEqual(authorization.payload["version"], 2)
+        budget_receipt = self._admit_for_authorization(binding, authorization)
+        receipt = self.executor.execute(
+            binding=binding, arguments=args, online_lease_grant=self.lease,
+            execution_grant=self.execution, budget_receipt=budget_receipt,
+            executor_authorization=authorization,
+        )
+        self.assertEqual(receipt["payload"]["receipt_version"], 2)
+        self.assertEqual(
+            receipt["payload"]["executor_authorization_digest"],
+            authorization.authorization_digest,
+        )
+        self.assertTrue(self.executor.verify_receipt(receipt, binding=binding))
+
+    def test_d107_tampered_authorization_digest_fails_signature_verification(self):
+        args = {"invoice_id": "INV-D107-TAMPER"}
+        binding = self._binding(args)
+        authorization = self._make_executor_authorization(arguments=args)
+        budget_receipt = self._admit_for_authorization(binding, authorization)
+        receipt = self.executor.execute(
+            binding=binding, arguments=args, online_lease_grant=self.lease,
+            execution_grant=self.execution, budget_receipt=budget_receipt,
+            executor_authorization=authorization,
+        )
+        tampered = dict(receipt)
+        tampered["payload"] = dict(receipt["payload"])
+        tampered["payload"]["executor_authorization_digest"] = digest(
+            {"forged": "authorization"}
+        )
+        self.assertFalse(verify_execution_receipt(tampered, self.executor_key.public_key()))
+
+    def test_d107_receipt_v2_missing_authorization_digest_fails_verification(self):
+        args = {"invoice_id": "INV-D107-MISSING"}
+        binding = self._binding(args)
+        authorization = self._make_executor_authorization(arguments=args)
+        budget_receipt = self._admit_for_authorization(binding, authorization)
+        receipt = self.executor.execute(
+            binding=binding, arguments=args, online_lease_grant=self.lease,
+            execution_grant=self.execution, budget_receipt=budget_receipt,
+            executor_authorization=authorization,
+        )
+        malformed = dict(receipt)
+        malformed["payload"] = dict(receipt["payload"])
+        del malformed["payload"]["executor_authorization_digest"]
+        self.assertFalse(verify_execution_receipt(malformed, self.executor_key.public_key()))
+
+    def test_d107_receipt_v1_verification_remains_compatible(self):
+        args = {"invoice_id": "INV-D107-V1COMPAT"}
+        binding = self._binding(args)
+        budget_receipt = self._admit(binding)
+        receipt = self.executor.execute(
+            binding=binding, arguments=args, online_lease_grant=self.lease,
+            execution_grant=self.execution, budget_receipt=budget_receipt,
+        )
+        self.assertTrue(verify_execution_receipt(receipt, self.executor_key.public_key(), expected={
+            "executor_id": self.EXECUTOR_ID,
+            "operation_id": binding.operation_id,
+            "binding_digest": binding.binding_digest,
+        }))
+
+    def test_d107_idempotent_retry_reuses_receipt_and_rejects_different_authorization(self):
+        args = {"invoice_id": "INV-D107-IDEMPOTENT"}
+        binding = self._binding(args)
+        auth_a = self._make_executor_authorization(arguments=args, authorization_id="auth-A")
+        budget_receipt = self._admit_for_authorization(binding, auth_a)
+        first = self.executor.execute(
+            binding=binding, arguments=args, online_lease_grant=self.lease,
+            execution_grant=self.execution, budget_receipt=budget_receipt,
+            executor_authorization=auth_a,
+        )
+        second = self.executor.execute(
+            binding=binding, arguments=args, online_lease_grant=self.lease,
+            execution_grant=self.execution, budget_receipt=budget_receipt,
+            executor_authorization=auth_a,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first["payload"]["executor_authorization_digest"], auth_a.authorization_digest
+        )
+
+        # Same operation and binding, but a different (valid) authorization B.
+        # Fabricate a budget receipt that binds operation_id to auth B's
+        # admission digest, so admission passes and execution reaches the
+        # ExecutionStore idempotency path that returns A's stored receipt.
+        auth_b = self._make_executor_authorization(arguments=args, authorization_id="auth-B")
+        self.assertNotEqual(auth_b.authorization_digest, auth_a.authorization_digest)
+        budget_payload = dict(budget_receipt["payload"])
+        budget_payload["request_digest"] = executor_admission_digest(
+            binding.binding_digest, auth_b
+        )
+        forged_budget_receipt = sign_budget_receipt(
+            budget_payload, self.coordinator_key
+        ).as_dict()
+        with self.assertRaises(ToolExecutionDenied):
+            self.executor.execute(
+                binding=binding, arguments=args, online_lease_grant=self.lease,
+                execution_grant=self.execution, budget_receipt=forged_budget_receipt,
+                executor_authorization=auth_b,
+            )
+        # The stored receipt must still be A's, not presented as B's result.
+        self.assertEqual(
+            self.executor.store.get_receipt(binding.operation_id)["payload"][
+                "executor_authorization_digest"
+            ],
+            auth_a.authorization_digest,
+        )
 
     def test_d106_executor_rechecks_argument_binding_when_runtime_is_bypassed(self):
         # The reviewer's key question: a caller bypasses the Runtime and invokes

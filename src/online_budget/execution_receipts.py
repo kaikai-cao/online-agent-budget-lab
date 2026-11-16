@@ -8,6 +8,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from .canonical import b64encode, canonical_json_bytes, digest, verify_signature
 
 
+RECEIPT_FIELDS_V1 = {
+    "receipt_version", "executor_id", "coordinator_id", "global_budget_id", "gateway_id",
+    "lease_id", "operation_id", "binding_digest", "budget_receipt_digest", "tool_name",
+    "tool_schema_hash", "arguments_digest", "status", "result_digest", "result", "completed_at",
+}
+# D10.7: Receipt v2 commits to the exact ExecutorAuthorization used. It keeps
+# every v1 field and adds the signed authorization digest.
+RECEIPT_FIELDS_V2 = RECEIPT_FIELDS_V1 | {"executor_authorization_digest"}
+
+
 @dataclass(frozen=True)
 class ExecutionReceipt:
     payload: dict[str, Any]
@@ -41,16 +51,24 @@ def verify_execution_receipt(
     try:
         parsed = receipt if isinstance(receipt, ExecutionReceipt) else ExecutionReceipt.from_dict(receipt)
         p = parsed.payload
-        required = {
-            "receipt_version", "executor_id", "coordinator_id", "global_budget_id", "gateway_id",
-            "lease_id", "operation_id", "binding_digest", "budget_receipt_digest", "tool_name",
-            "tool_schema_hash", "arguments_digest", "status", "result_digest", "result", "completed_at",
-        }
-        if set(p) != required or p["receipt_version"] != 1:
+        version = p.get("receipt_version")
+        if version == 1:
+            if set(p) != RECEIPT_FIELDS_V1:
+                return False
+        elif version == 2:
+            if set(p) != RECEIPT_FIELDS_V2:
+                return False
+        else:
             return False
         if p["status"] not in {"SUCCEEDED", "FAILED"}:
             return False
-        for field in ("binding_digest", "budget_receipt_digest", "tool_schema_hash", "arguments_digest", "result_digest"):
+        digest_fields = (
+            "binding_digest", "budget_receipt_digest", "tool_schema_hash",
+            "arguments_digest", "result_digest",
+        )
+        if version == 2:
+            digest_fields += ("executor_authorization_digest",)
+        for field in digest_fields:
             if not isinstance(p[field], str) or len(p[field]) != 71 or not p[field].startswith("sha256:"):
                 return False
         if not isinstance(p["completed_at"], int) or isinstance(p["completed_at"], bool):

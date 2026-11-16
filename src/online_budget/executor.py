@@ -240,12 +240,25 @@ class TrustedToolExecutor:
             binding, online_lease_grant, execution_grant, budget_receipt,
             executor_authorization=executor_authorization,
         )
+        # D10.7: the receipt must commit to the exact ExecutorAuthorization that
+        # was actually verified and used for this execution. Reuse the existing
+        # ExecutorAuthorization parsing/digest logic; handle both the object and
+        # Mapping forms. Callers never supply a digest themselves.
+        if executor_authorization is None:
+            authorization_digest = None
+        else:
+            auth = (
+                executor_authorization
+                if isinstance(executor_authorization, ExecutorAuthorization)
+                else ExecutorAuthorization.from_dict(executor_authorization)
+            )
+            authorization_digest = auth.authorization_digest
         now = int(self.clock())
 
         def make_receipt(state: str, result: Any, error: str | None, completed_at: int) -> dict[str, Any]:
             result_digest = digest({"domain": "agent-tool-result-v1", "result": result})
             payload = {
-                "receipt_version": 1,
+                "receipt_version": 1 if authorization_digest is None else 2,
                 "executor_id": self.executor_id,
                 "coordinator_id": binding.coordinator_id,
                 "global_budget_id": binding.global_budget_id,
@@ -262,6 +275,8 @@ class TrustedToolExecutor:
                 "result": result,
                 "completed_at": completed_at,
             }
+            if authorization_digest is not None:
+                payload["executor_authorization_digest"] = authorization_digest
             return sign_execution_receipt(payload, self.executor_private_key).as_dict()
 
         state, result, error, execution_receipt, _created = self.store.execute_once(
@@ -272,12 +287,24 @@ class TrustedToolExecutor:
             make_receipt=make_receipt,
             now=now,
         )
-        if not verify_execution_receipt(execution_receipt, self.executor_private_key.public_key(), expected={
+        expected = {
             "executor_id": self.executor_id,
             "operation_id": binding.operation_id,
             "binding_digest": binding.binding_digest,
             "budget_receipt_digest": receipt.receipt_digest,
-        }):
+        }
+        # D10.7: ExecutionStore deduplicates on operation_id + binding_digest
+        # only. On an idempotent retry it returns the stored receipt verbatim,
+        # which may have been produced under a *different* authorization. Bind
+        # the returned receipt to the authorization used in this call, so a
+        # valid receipt for authorization A cannot be presented as the result
+        # of an execution claimed to use authorization B. This is a verification
+        # constraint only; the ExecutionStore schema/API is untouched.
+        if authorization_digest is not None:
+            expected["executor_authorization_digest"] = authorization_digest
+        if not verify_execution_receipt(
+            execution_receipt, self.executor_private_key.public_key(), expected=expected,
+        ):
             raise ToolExecutionDenied("persisted Execution Receipt failed verification")
         return execution_receipt
 
