@@ -96,7 +96,8 @@ class MeteringTests(unittest.TestCase):
                 {"tool_name": self.TOOL_NAME, "tool_schema_hash": self.schema_hash, "cost": self.COST},
             ],
         )
-        self.assertTrue(m.verify_metering_policy(self.policy, self.issuer_key.public_key()))
+        self.verified_policy = m.verify_metering_policy(self.policy, self.issuer_key.public_key())
+        self.assertIsInstance(self.verified_policy, m.VerifiedMeteringPolicy)
         self.scope = m.BudgetScope(
             global_budget_id=self.lease.global_budget_id,
             lease_id=self.lease.lease_id,
@@ -141,7 +142,7 @@ class MeteringTests(unittest.TestCase):
             tool_name=self.TOOL_NAME,
             tool_schema_hash=self.schema_hash,
             budget_scope=self.scope,
-            verified_policy=self.policy,
+            verified_policy=self.verified_policy,
             issued_at=self.NOW - 10,
             expires_at=self.NOW + 100,
         )
@@ -156,7 +157,7 @@ class MeteringTests(unittest.TestCase):
             expected_binding=self.binding,
             expected_authorization_digest=auth_digest or self.authorization.authorization_digest,
             expected_budget_scope=scope or self.scope,
-            expected_policy=policy or self.policy,
+            expected_policy=policy or self.verified_policy,
             now=self.NOW if now is None else now,
         )
 
@@ -172,34 +173,37 @@ class MeteringTests(unittest.TestCase):
     def test_M01_parse_signed_policy(self):
         parsed = m.parse_metering_policy(self.policy.as_dict())
         self.assertEqual(parsed.unsigned_payload(), self.policy.unsigned_payload())
-        self.assertFalse(parsed.is_verified())
+        self.assertIsInstance(parsed, m.MeteringPolicy)
+        self.assertNotIsInstance(parsed, m.VerifiedMeteringPolicy)
 
     def test_M02_issuer_signature_verifies(self):
         policy = m.parse_metering_policy(self.policy.as_dict())
-        self.assertTrue(m.verify_metering_policy(policy, self.issuer_key.public_key()))
-        self.assertTrue(policy.is_verified())
+        verified = m.verify_metering_policy(policy, self.issuer_key.public_key())
+        self.assertIsInstance(verified, m.VerifiedMeteringPolicy)
+        self.assertTrue(verified.is_verified())
+        self.assertEqual(verified.digest, m.compute_metering_policy_digest(policy))
 
     def test_M03_tampered_cost_rejected(self):
         raw = self.policy.as_dict()
         raw["entries"][0]["cost"] = 99
         policy = m.parse_metering_policy(raw)
-        self.assertFalse(m.verify_metering_policy(policy, self.issuer_key.public_key()))
+        self.assertIsNone(m.verify_metering_policy(policy, self.issuer_key.public_key()))
 
     def test_M04_tampered_P_rejected(self):
         raw = self.policy.as_dict()
         raw["P"] = enc.fp_to_hex(999)
         policy = m.parse_metering_policy(raw)
-        self.assertFalse(m.verify_metering_policy(policy, self.issuer_key.public_key()))
+        self.assertIsNone(m.verify_metering_policy(policy, self.issuer_key.public_key()))
 
     def test_M05_tampered_policy_version_rejected(self):
         raw = self.policy.as_dict()
         raw["policy_version"] = "policy-v2"
         policy = m.parse_metering_policy(raw)
-        self.assertFalse(m.verify_metering_policy(policy, self.issuer_key.public_key()))
+        self.assertIsNone(m.verify_metering_policy(policy, self.issuer_key.public_key()))
 
     def test_M06_wrong_issuer_key_rejected(self):
         policy = m.parse_metering_policy(self.policy.as_dict())
-        self.assertFalse(m.verify_metering_policy(policy, Ed25519PrivateKey.generate().public_key()))
+        self.assertIsNone(m.verify_metering_policy(policy, Ed25519PrivateKey.generate().public_key()))
 
     def test_M07_duplicate_rule_rejected(self):
         raw = self.policy.as_dict()
@@ -209,11 +213,11 @@ class MeteringTests(unittest.TestCase):
 
     def test_M08_unregistered_tool_rejected(self):
         with self.assertRaises(m.MeteringError):
-            m.compute_cost("unknown_tool", self.schema_hash, self.policy)
+            m.compute_cost("unknown_tool", self.schema_hash, self.verified_policy)
 
     def test_M09_schema_hash_mismatch_rejected(self):
         with self.assertRaises(m.MeteringError):
-            m.compute_cost(self.TOOL_NAME, self._alt_sha("schema"), self.policy)
+            m.compute_cost(self.TOOL_NAME, self._alt_sha("schema"), self.verified_policy)
 
     def test_M10_zero_cost_rejected(self):
         raw = self.policy.as_dict()
@@ -228,7 +232,7 @@ class MeteringTests(unittest.TestCase):
             m.parse_metering_policy(raw)
 
     def test_M12_compute_cost_returns_signed_value(self):
-        self.assertEqual(m.compute_cost(self.TOOL_NAME, self.schema_hash, self.policy), self.COST)
+        self.assertEqual(m.compute_cost(self.TOOL_NAME, self.schema_hash, self.verified_policy), self.COST)
 
     # ------------------------------------------------------- M13–M19 issue/verify
     def test_M13_issue_attestation(self):
@@ -341,7 +345,7 @@ class MeteringTests(unittest.TestCase):
             expected_binding=self.binding,
             expected_authorization_digest=self.authorization.authorization_digest,
             expected_budget_scope=self.scope,
-            expected_policy=self.policy,
+            expected_policy=self.verified_policy,
             now=self.NOW,
         ))
 
@@ -385,6 +389,80 @@ class MeteringTests(unittest.TestCase):
         self.assertNotEqual(m.POLICY_DOMAIN, m.ATTESTATION_DOMAIN)
         self.assertEqual(m.POLICY_DOMAIN, "d11-e1-metering-policy-v1")
         self.assertEqual(m.ATTESTATION_DOMAIN, "d11-e1-metering-attestation-v1")
+
+    # --------------------------------------------- E1.2 review fix: block 1
+    def test_verified_policy_cannot_be_cloned_with_tampered_cost(self):
+        # VerifiedMeteringPolicy is intentionally NOT a dataclass: the exact
+        # dataclasses.replace() clone-then-keep-verified attack must not work.
+        with self.assertRaises(TypeError):
+            replace(self.verified_policy, entries=(
+                m.PolicyEntry(self.TOOL_NAME, self.schema_hash, 999),
+            ))
+        # Direct attribute reassignment is refused as well.
+        with self.assertRaises(m.MeteringError):
+            self.verified_policy._policy = self.policy
+
+    def test_tampered_policy_copy_cannot_be_reused_as_verified(self):
+        # Copy the unverified policy with a changed fee table (legal dataclass
+        # replace), then show it can neither be verified nor used for cost.
+        forged_raw = replace(self.policy, entries=(
+            m.PolicyEntry(self.TOOL_NAME, self.schema_hash, 999),
+        ))
+        self.assertIsNone(m.verify_metering_policy(forged_raw, self.issuer_key.public_key()))
+        with self.assertRaises(m.MeteringError):
+            m.compute_cost(self.TOOL_NAME, self.schema_hash, forged_raw)
+
+    def test_verified_policy_integrity_fail_closed(self):
+        # Even fabricating a "verified" object that keeps the old sealed digest
+        # while swapping in a tampered fee table must fail: the digest was bound
+        # to the original signed content at verification time.
+        forged = m.VerifiedMeteringPolicy(
+            replace(self.policy, entries=(
+                m.PolicyEntry(self.TOOL_NAME, self.schema_hash, 999),
+            )),
+            self.verified_policy.digest,
+        )
+        self.assertFalse(forged.integrity_ok())
+        with self.assertRaises(m.MeteringError):
+            m.compute_cost(self.TOOL_NAME, self.schema_hash, forged)
+
+    # --------------------------------------------- E1.2 review fix: block 2
+    def test_scope_P_policy_mismatch_rejected(self):
+        # E.0 §3.4: P <-> (metering_policy_digest, policy content). A validly
+        # Issuer-signed policy with P=8 combined with a trusted BudgetScope whose
+        # P=7 must be rejected, even if every independent field comparison and
+        # the recomputed c otherwise agree, and the attestation is genuinely
+        # Executor-signed.
+        policy_p8 = m.sign_metering_policy(
+            self.issuer_key,
+            issuer_id=self.ISSUER_ID,
+            policy_version="policy-v8",
+            P=enc.fp_to_hex(8),
+            entries=[
+                {"tool_name": self.TOOL_NAME, "tool_schema_hash": self.schema_hash, "cost": self.COST},
+            ],
+        )
+        verified_p8 = m.verify_metering_policy(policy_p8, self.issuer_key.public_key())
+        self.assertIsInstance(verified_p8, m.VerifiedMeteringPolicy)
+
+        # self.scope.P == self.P == fp(7); the base attestation's P matches it.
+        self.assertEqual(self.scope.P, self.P)
+        self.assertEqual(self.attestation.attestation["P"], self.scope.P)
+        payload = dict(self.attestation.attestation)
+        # Attestation digest matches the P=8 policy (independent check passes).
+        payload["metering_policy_digest"] = m.compute_metering_policy_digest(verified_p8)
+        # c matches recomputation from the P=8 policy (cost table identical).
+        payload["c"] = m.compute_cost(self.TOOL_NAME, self.schema_hash, verified_p8)
+        forged = self._resign(payload)  # valid Executor signature over this payload
+
+        self.assertFalse(m.verify_metering_attestation(
+            forged, self.executor_key.public_key(),
+            expected_binding=self.binding,
+            expected_authorization_digest=self.authorization.authorization_digest,
+            expected_budget_scope=self.scope,  # P = fp(7)
+            expected_policy=verified_p8,        # P = fp(8)
+            now=self.NOW,
+        ))
 
 
 if __name__ == "__main__":

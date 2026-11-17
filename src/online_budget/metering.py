@@ -23,7 +23,7 @@ the Ed25519 conventions are reused from ``online_budget.canonical``.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -32,7 +32,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from . import e1_encoding as enc
-from .canonical import b64encode, canonical_json_bytes, verify_signature
+from .canonical import (
+    b64encode,
+    canonical_json_bytes,
+    public_key_bytes,
+    verify_signature,
+)
 from .executor_authorization import ExecutorAuthorization
 from .tool_binding import ToolCallBinding
 
@@ -150,11 +155,14 @@ def _parse_entry(raw: Any) -> PolicyEntry:
 
 @dataclass(frozen=True)
 class MeteringPolicy:
-    """An Issuer-signed policy. ``_verified`` is set only after signature check.
+    """Parsed but NOT trusted policy data.
 
-    Business fields are frozen; ``entries`` is a tuple of frozen entries, so a
-    policy cannot be mutated after verification to change the fee table. The
-    envelope is reconstructed on demand; no caller-supplied digest is stored.
+    This type deliberately carries no verification flag. Trust is represented
+    by a distinct :class:`VerifiedMeteringPolicy`, obtainable ONLY as the return
+    value of :func:`verify_metering_policy`. Keeping the unverified and verified
+    representations as separate types closes the ``dataclasses.replace()`` hole:
+    a caller cannot copy a policy, change its fee table, and reuse a stale
+    ``_verified=True`` flag.
     """
 
     version: int
@@ -163,7 +171,6 @@ class MeteringPolicy:
     P: str
     entries: tuple[PolicyEntry, ...]
     signature_b64: str
-    _verified: bool = field(default=False, repr=False, compare=False)
 
     def unsigned_payload(self) -> dict[str, Any]:
         return {
@@ -177,8 +184,62 @@ class MeteringPolicy:
     def as_dict(self) -> dict[str, Any]:
         return {**self.unsigned_payload(), "signature_b64": self.signature_b64}
 
+
+class VerifiedMeteringPolicy:
+    """An Issuer-verified policy; the ONLY type cost/issue/verify accept.
+
+    This is intentionally NOT a dataclass: ``dataclasses.replace()`` cannot
+    clone it, so there is no public way to manufacture a "verified" policy with
+    a modified fee table. It is constructed solely by
+    :func:`verify_metering_policy` after the Ed25519 signature check succeeds.
+
+    The object is immutable by convention (private slots, no setters) and keeps
+    a private digest that was computed from the exact verified content. Every
+    consumer re-checks that the current payload still hashes to that digest, so
+    even in-process mutation attempts are detected (fail closed).
+    """
+
+    __slots__ = ("_policy", "_digest")
+
+    def __init__(self, policy: MeteringPolicy, digest: str) -> None:
+        # Private constructor: callers must go through verify_metering_policy().
+        object.__setattr__(self, "_policy", policy)
+        object.__setattr__(self, "_digest", digest)
+
+    @property
+    def policy(self) -> MeteringPolicy:
+        return self._policy
+
+    @property
+    def digest(self) -> str:
+        return self._digest
+
+    @property
+    def P(self) -> str:
+        return self._policy.P
+
+    @property
+    def entries(self) -> tuple[PolicyEntry, ...]:
+        return self._policy.entries
+
+    def unsigned_payload(self) -> dict[str, Any]:
+        return self._policy.unsigned_payload()
+
+    def as_dict(self) -> dict[str, Any]:
+        return self._policy.as_dict()
+
     def is_verified(self) -> bool:
-        return self._verified
+        return True
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise MeteringError("VerifiedMeteringPolicy is immutable")
+
+    def integrity_ok(self) -> bool:
+        """Fail closed if the wrapped payload no longer matches the signed digest."""
+        try:
+            return compute_metering_policy_digest(self._policy) == self._digest
+        except (MeteringError, TypeError, ValueError):
+            return False
 
 
 def parse_metering_policy(raw: Any) -> MeteringPolicy:
@@ -231,10 +292,12 @@ def parse_metering_policy(raw: Any) -> MeteringPolicy:
         raise MeteringError(f"cannot parse Metering Policy: {exc}") from exc
 
 
-def compute_metering_policy_digest(policy: MeteringPolicy) -> str:
+def compute_metering_policy_digest(
+    policy: MeteringPolicy | VerifiedMeteringPolicy,
+) -> str:
     """D_P = digest of the nested domain/payload; excludes signature_b64."""
-    if not isinstance(policy, MeteringPolicy):
-        raise MeteringError("policy must be a MeteringPolicy")
+    if not isinstance(policy, (MeteringPolicy, VerifiedMeteringPolicy)):
+        raise MeteringError("policy must be a MeteringPolicy or VerifiedMeteringPolicy")
     return enc.canonical_digest(POLICY_DOMAIN, policy.unsigned_payload())
 
 
@@ -294,36 +357,44 @@ def sign_metering_policy(
 
 def verify_metering_policy(
     policy: MeteringPolicy, issuer_public_key: Ed25519PublicKey,
-) -> bool:
-    """Verify Issuer signature over D_P's exact message; mark verified on success."""
+) -> VerifiedMeteringPolicy | None:
+    """Verify the Issuer signature and return a sealed verified policy.
+
+    Returns ``None`` on any failure (falsy, so ``if verify_metering_policy(...)``
+    still works). The returned :class:`VerifiedMeteringPolicy` is the only value
+    accepted by :func:`compute_cost`, :func:`issue_metering_attestation`, and
+    :func:`verify_metering_attestation`. Verification binds the exact signed
+    content into the object, so a tampered copy cannot inherit trust.
+    """
     try:
         if not isinstance(policy, MeteringPolicy):
-            return False
+            return None
         # Re-validate shape defensively (a parsed object is already validated).
         expected = POLICY_FIELDS | {"signature_b64"}
         if set(policy.as_dict()) != expected:
-            return False
+            return None
         if not isinstance(issuer_public_key, Ed25519PublicKey):
-            return False
+            return None
         message = {
             "domain": POLICY_DOMAIN,
             "payload": policy.unsigned_payload(),
         }
         verify_signature(issuer_public_key, policy.signature_b64, message)
-        # Recompute D_P; a caller can never inject its own digest.
-        compute_metering_policy_digest(policy)
-        object.__setattr__(policy, "_verified", True)
-        return True
+        # Bind the exact signed content into a sealed digest at verification time.
+        digest_value = enc.canonical_digest(POLICY_DOMAIN, policy.unsigned_payload())
+        return VerifiedMeteringPolicy(policy, digest_value)
     except (MeteringError, TypeError, ValueError):
-        return False
+        return None
 
 
 def compute_cost(
-    tool_name: str, schema_hash: str, policy: MeteringPolicy,
+    tool_name: str, schema_hash: str, policy: VerifiedMeteringPolicy,
 ) -> int:
-    """Return the exact signed cost; requires an already-verified policy."""
-    if not isinstance(policy, MeteringPolicy) or not policy.is_verified():
-        raise MeteringError("policy has not been verified by the Issuer key")
+    """Return the exact signed cost; requires a sealed verified policy object."""
+    if not isinstance(policy, VerifiedMeteringPolicy):
+        raise MeteringError("policy must be an Issuer-verified VerifiedMeteringPolicy")
+    if not policy.integrity_ok():
+        raise MeteringError("verified policy content no longer matches its signed digest")
     if not isinstance(tool_name, str) or not tool_name:
         raise MeteringError("tool_name must be a non-empty string")
     _sha256(schema_hash, "tool_schema_hash")
@@ -426,7 +497,7 @@ def issue_metering_attestation(
     tool_name: str,
     tool_schema_hash: str,
     budget_scope: BudgetScope,
-    verified_policy: MeteringPolicy,
+    verified_policy: VerifiedMeteringPolicy,
     issued_at: int,
     expires_at: int,
 ) -> MeteringAttestation:
@@ -449,8 +520,10 @@ def issue_metering_attestation(
         if not isinstance(budget_scope, BudgetScope):
             raise MeteringError("budget_scope must be a BudgetScope")
         budget_scope.validate()
-        if not isinstance(verified_policy, MeteringPolicy) or not verified_policy.is_verified():
-            raise MeteringError("verified_policy must be an Issuer-verified policy")
+        if not isinstance(verified_policy, VerifiedMeteringPolicy):
+            raise MeteringError("verified_policy must be an Issuer-verified VerifiedMeteringPolicy")
+        if not verified_policy.integrity_ok():
+            raise MeteringError("verified_policy content no longer matches its signed digest")
         _nonempty(executor_id, "executor_id")
         _nonempty(operation_id, "operation_id")
 
@@ -509,7 +582,7 @@ def verify_metering_attestation(
     expected_binding: ToolCallBinding | Mapping[str, Any],
     expected_authorization_digest: str,
     expected_budget_scope: BudgetScope | Mapping[str, Any],
-    expected_policy: MeteringPolicy,
+    expected_policy: VerifiedMeteringPolicy,
     now: int,
 ) -> bool:
     """Verify signature AND every binding/context field. Signature alone is not enough."""
@@ -541,7 +614,16 @@ def verify_metering_attestation(
             else BudgetScope(**expected_budget_scope)
         )
         scope.validate()
-        if not isinstance(expected_policy, MeteringPolicy) or not expected_policy.is_verified():
+        if not isinstance(expected_policy, VerifiedMeteringPolicy):
+            return False
+        if not expected_policy.integrity_ok():
+            return False
+        # E.0 §3.4: P <-> (metering_policy_digest, policy content). Binding the
+        # attestation's P to scope.P and its digest to the policy is NOT enough:
+        # scope.P must be the very P that the Issuer assigned to this policy.
+        # Without this check a P=7 attestation could carry a validly signed P=8
+        # policy digest and still pass every independent comparison.
+        if scope.P != expected_policy.P:
             return False
         _sha256(expected_authorization_digest, "expected_authorization_digest")
         _integer(now, "now")
@@ -599,6 +681,7 @@ __all__ = [
     "MeteringError",
     "PolicyEntry",
     "MeteringPolicy",
+    "VerifiedMeteringPolicy",
     "BudgetScope",
     "MeteringAttestation",
     "parse_metering_policy",
