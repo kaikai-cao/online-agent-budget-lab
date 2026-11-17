@@ -36,6 +36,7 @@ from online_budget.e1_receipts import RECEIPT_DOMAIN, RECEIPT_SIGN_DOMAIN
 from online_budget.e1_runtime import PendingExecution, run_tool_call_e1
 from online_budget.executor import LocalToolRegistry, ToolExecutionDenied, TrustedToolExecutor
 from online_budget.executor_authorization import issue_executor_authorization
+from online_budget.receipts import BudgetReceipt
 from online_budget.metering import (
     BudgetScope, compute_metering_policy_digest, parse_metering_policy, sign_metering_policy,
 )
@@ -489,6 +490,83 @@ class E1ExecutionGateTests(unittest.TestCase):
                 authorization_policy="authorization_required", e1_required=True,
                 d11_coordinator_public_keys={},
             )
+
+    # ------------------------------------------------- dispatch capability gate //
+    def _d10_executor(self) -> TrustedToolExecutor:
+        """A legacy D10-only Executor (no E1 gate) with its own counting registry."""
+        tmp = tempfile.TemporaryDirectory(prefix="e15-d10-exec-")
+        self.addCleanup(tmp.cleanup)
+        registry = _CountingRegistry()
+        ex = TrustedToolExecutor(
+            executor_id=EXECUTOR_ID, issuer_public_key=self.issuer.public_key(),
+            coordinator_public_key=self.d10_coord.public_key(),
+            executor_private_key=self.executor_key,
+            database_path=str(Path(tmp.name) / "exec.sqlite3"), registry=registry,
+            clock=lambda: self.now,
+        )
+        ex.counter = registry
+        return ex
+
+    def _direct_dispatch_kwargs(self) -> dict:
+        """Well-formed helper arguments a bypass caller would try to pass."""
+        return dict(
+            binding=self._reconstruct_binding(),
+            safe_arguments=dict(ARGS),
+            receipt=BudgetReceipt.from_dict(self.pending.d10_budget_receipt),
+            authorization_digest=None,
+        )
+
+    def test_c21_e1_mode_direct_dispatch_helper_denied(self):
+        ex = self._executor()
+        with self.assertRaises(ToolExecutionDenied):
+            ex._dispatch_and_seal(**self._direct_dispatch_kwargs())
+        self.assertEqual(ex.counter.dispatch_count, 0)
+
+    def test_c22_d10_mode_direct_dispatch_helper_denied(self):
+        ex = self._d10_executor()
+        with self.assertRaises(ToolExecutionDenied):
+            ex._dispatch_and_seal(**self._direct_dispatch_kwargs())
+        self.assertEqual(ex.counter.dispatch_count, 0)
+
+    def test_c23_d10_normal_execute_still_succeeds(self):
+        """Capability gate must not break the legacy D10-only execute() path."""
+        from online_budget.tool_binding import build_tool_call_binding
+        op = "op-e15-d10-direct"
+        execution = self._make_execution(op)
+        self.adapter.bind_lease(execution, self.lease)
+        binding = build_tool_call_binding(
+            operation_id=op, gateway_id=GATEWAY_ID,
+            coordinator_id=COORDINATOR_ID, online_lease_grant=self.lease,
+            execution_grant=execution, tool_name="invoice_review",
+            tool_schema_hash=self.schema_hash, arguments=ARGS, executor_id=EXECUTOR_ID,
+        )
+        self.adapter.consume_for_grant(
+            execution, operation_id=op, request_digest=binding.binding_digest
+        )
+        budget_receipt = self.adapter.coordinator_receipt_for_operation(op)
+        ex = self._d10_executor()
+        receipt = ex.execute(
+            binding=binding, arguments=ARGS, online_lease_grant=self.lease,
+            execution_grant=execution, budget_receipt=budget_receipt,
+        )
+        self.assertEqual(ex.counter.dispatch_count, 1)
+        self.assertEqual(receipt["payload"]["status"], "SUCCEEDED")
+        self.assertEqual(receipt["payload"]["receipt_version"], 1)
+
+    def test_c24_capability_is_one_shot_and_bound_to_its_operation(self):
+        """A minted capability cannot be replayed or reused for another binding."""
+        ex = self._executor()
+        cap = ex._issue_dispatch_capability(
+            self._reconstruct_binding(),
+            BudgetReceipt.from_dict(self.pending.d10_budget_receipt),
+        )
+        # Consume once through a valid E1 call path is covered by c11; here the
+        # token itself must be single-use even across direct helper calls.
+        ex._dispatch_and_seal(**self._direct_dispatch_kwargs(), _capability=cap)
+        self.assertEqual(ex.counter.dispatch_count, 1)
+        with self.assertRaises(ToolExecutionDenied):
+            ex._dispatch_and_seal(**self._direct_dispatch_kwargs(), _capability=cap)
+        self.assertEqual(ex.counter.dispatch_count, 1)
 
 
 def _budget_digest(pending: PendingExecution) -> str:
