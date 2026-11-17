@@ -27,6 +27,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from online_budget import journal as jmod
 from online_budget.journal import (
     GENESIS_PREV_DIGEST,
     AuthorityJournal,
@@ -260,6 +261,82 @@ class _JournalCase(unittest.TestCase):
                 operation_id="bad",
                 envelope={"operation_id": "bad", "binding_digest": _digest("a")},
             )
+
+    # -- E1.9-A.1 fix #1: outer/envelope operation_id binding -----------------
+    def test_append_rejects_operation_id_binding_mismatch(self):
+        # Outer argument A but envelope promises B: append must refuse immediately.
+        with self.assertRaises(JournalError):
+            self.journal.append(
+                phase="INTENT", operation_id="A", envelope=_intent("B")
+            )
+        # RESULT path too (envelope id differs from outer id).
+        self.journal.append(phase="INTENT", operation_id="A", envelope=_intent("A"))
+        with self.assertRaises(JournalError):
+            self.journal.append(
+                phase="RESULT", operation_id="A", envelope=_result("B")
+            )
+        # Nothing was admitted by either rejected call.
+        self.assertEqual(self.journal.verify_integrity(), 1)
+
+    def test_verify_entry_independently_rejects_operation_id_binding(self):
+        # Forge a fully self-consistent signed entry whose envelope carries a
+        # different operation_id than the signed outer field (simulating a write
+        # path that bypassed append). The read-time verifier must reject it on its
+        # own, without relying on append's guard.
+        env = _intent("outer-op")
+        forged = dict(env)
+        forged["operation_id"] = "inner-op"
+        pdig = jmod._intent_payload_digest(forged)
+        unsigned = {
+            "seq": 1,
+            "prev_digest": GENESIS_PREV_DIGEST,
+            "operation_id": "outer-op",  # outer says outer-op
+            "phase": "INTENT",
+            "executor_id": "exec-A",
+            "payload_digest": pdig,  # digest commits to envelope saying inner-op
+        }
+        ed = jmod._entry_digest(unsigned)
+        entry = {
+            **unsigned,
+            "envelope": forged,
+            "entry_digest": ed,
+            "entry_signature": jmod._sign(self.key, jmod._entry_sign_message(ed)),
+        }
+        with self.assertRaises(JournalIntegrityError):
+            self.journal._verify_entry(entry)
+
+    # -- E1.9-A.1 fix #2: unsigned helper columns not trusted -----------------
+    def test_verify_detects_tampered_helper_column(self):
+        self._append_pair(self.journal, "opH", value=1)
+        # Directly rewrite the UNSIGNED helper column only; entry_json is intact.
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.execute(
+                "UPDATE journal_entries SET executor_id='attacker' WHERE phase='INTENT'"
+            )
+            con.commit()
+        reopened = self._open()
+        with self.assertRaises(JournalIntegrityError):
+            reopened.verify_integrity()
+
+    def test_result_inheritance_ignores_tampered_helper_column(self):
+        # Even before integrity checking, RESULT must inherit executor_id from
+        # the SIGNED INTENT entry_json, not the mutable helper column.
+        self.journal.append(
+            phase="INTENT", operation_id="opI", envelope=_intent("opI", executor="honest")
+        )
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.execute(
+                "UPDATE journal_entries SET executor_id='attacker' WHERE operation_id='opI'"
+            )
+            con.commit()
+        reopened = self._open()
+        result = reopened.append(
+            phase="RESULT", operation_id="opI", envelope=_result("opI", value=3)
+        )
+        self.assertEqual(result["executor_id"], "honest")
+        # The signed entry_json stored for the RESULT also carries the honest id.
+        stored = reopened.entries_from(2)[0]
+        self.assertEqual(stored["executor_id"], "honest")
 
 
 if __name__ == "__main__":

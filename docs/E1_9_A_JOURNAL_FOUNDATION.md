@@ -4,6 +4,10 @@
 > 本阶段只建立独立权威 Journal 自身，**不接入** `TrustedToolExecutor`，不改执行流程/门禁/凭据。
 > 结论先行：Journal 核心组件（追加、签名链、检查点、恢复、完整性验证、物理/密钥分离）已实现并通过 J01–J10；
 > **但"独立文件 + 独立密钥"不等于已实现 B2 抗回滚**，信任边界阻碍与可行方案见第 7 节，必须如实阅读。
+>
+> **E1.9-A.1 限定回修**（针对 `796fffd` 的审查）：修复两处代码问题——①外层与 envelope 的 `operation_id` 绑定；
+> ②未签名 SQLite 辅助列不得参与安全敏感决策。仅改 `journal.py` / `test_e1_journal.py` / 本报告三文件，
+> 不改 E1.8、不改生产执行流程、不进入 E1.9-B。修复细节与测试数字见第 9 节。
 
 ## 1. 信任边界与部署架构
 
@@ -31,9 +35,9 @@
 
 | 文件 | 类型 | 说明 |
 |---|---|---|
-| `src/online_budget/journal.py` | 新增 | 权威 Journal 核心组件（约 380 行） |
-| `tests/test_e1_journal.py` | 新增 | J01–J10 及负向测试（12 个用例） |
-| `docs/E1_9_A_JOURNAL_FOUNDATION.md` | 新增 | 本验收报告 |
+| `src/online_budget/journal.py` | 新增 | 权威 Journal 核心组件（约 410 行） |
+| `tests/test_e1_journal.py` | 新增 | J01–J10 及负向测试（16 个用例，含 A.1 新增 4 个） |
+| `docs/E1_9_A_JOURNAL_FOUNDATION.md` | 新增 | 本验收报告（含第 9 节 A.1 回修记录） |
 
 未修改：`executor.py`、`execution_store.py`、`e1_runtime.py`、`cross_layer_bridge.py`、`e1_receipts.py`、
 任何 D10/D11 源文件、任何 E1.5 门禁代码、E1.8 冻结文档、Rust crate。
@@ -68,7 +72,8 @@
   （**不含** `entry_digest`/`entry_signature`/`envelope` 全文；envelope 经其 `payload_digest` 被间接承诺，无循环依赖）
 - `entry_digest = canonical_digest("e1-journal-entry-v1", unsigned_entry)`
 - `entry_signature = Ed25519_sign(authority, canonical_json({"domain":"e1-journal-entry-sign-v1","entry_digest":entry_digest}))`
-- `executor_id`：INTENT 时取自 envelope；RESULT 时从同 `operation_id` 的首条 INTENT 继承（E1.8 JournalEntry 含 executor_id）
+- `executor_id`：INTENT 时取自 envelope；RESULT 时从同 `operation_id` 的首条 INTENT **已签名 `entry_json`** 继承（读取时重新验签，绝不读未签名 SQLite 辅助列；E1.9-A.1）
+- **身份绑定（E1.9-A.1）**：外层参数 `operation_id` 必须等于 envelope 内 `operation_id`——`append()` 写入前拒绝不符，`_verify_entry()` 读取时独立复验该等式。
 
 **Checkpoint 字段（精确集）**：`seq`、`journal_head_digest`、`checkpoint_digest`、`checkpoint_signature`。
 - `journal_head_digest(seq)` = **该 seq 处**条目的 `entry_digest`（历史快照语义，不是最新 head）
@@ -102,7 +107,8 @@ checkpoint 与同 seq 的 entry_digest 绑定；`head()`/`checkpoint_at(seq)`/`e
 | J10 | 恢复 Executor 旧 DB 快照 → Journal 字节与历史不变 | PASS（仅证明物理分离） |
 
 另外 2 个负向用例：无 INTENT 的 RESULT 被拒、INTENT envelope 字段集错误被拒，均 PASS。
-**小计 12/12 通过。**
+E1.9-A.1 新增 4 个负向用例（外层/envelope operation_id 绑定 2 个、辅助列信任 2 个，见第 9 节），均 PASS。
+**小计 16/16 通过（A.1 回修后）。**
 
 ## 5. 重启恢复与篡改检测证据
 - 重启恢复：J05 用新 `AuthorityJournal` 实例重开同一文件，`verify_integrity()` 通过、
@@ -132,7 +138,8 @@ checkpoint 与同 seq 的 entry_digest 绑定；`head()`/`checkpoint_at(seq)`/`e
 4. **并发边界**：J09 证明单进程内多实例经 SQLite 写锁得到连续 seq；跨主机/分布式场景不在本阶段范围。
 5. **系统测试基线**：本阶段仅新增独立模块与测试，未触碰任何现有生产代码。
    改动前基线 `PYTHONPATH=src .venv/Scripts/python -m unittest discover -s tests` = **194/194 OK**；
-   改动后完整全量（含 J01–J10 与 2 负向用例）= **206/206 OK**（`git diff --cached --check` = 0）。
+   A.1 回修前完整全量（含 J01–J10 与 2 负向用例）= **206/206 OK**；
+   A.1 回修后完整全量（含新增 4 负向用例）= **210/210 OK**（`git diff --cached --check` = 0，见第 9 节）。
 
 ## 8. 通过标准对照
 要求："Journal 作为独立组件具备完整的追加、签名、检查点、恢复和验证能力，且其持久化信任边界满足 B2 的基本要求。否则不能进入下一阶段。"
@@ -140,3 +147,39 @@ checkpoint 与同 seq 的 entry_digest 绑定；`head()`/`checkpoint_at(seq)`/`e
 - 持久化信任边界：在本单机原型中**仅满足组件级隔离与篡改检测，未满足 E1.8 §2.2 意义上的抗回滚**（§1.2/§7）。
 - 判定：**E1.9-A 的"Journal Foundation"组件交付完成；但"满足 B2 基本要求"这一整体通过条件，
   取决于后续是否落实独立信任域（§7 方案 a–d）。在进入 E1.9-B 之前，需就此作出决策**，不得默认已通过。
+
+## 9. E1.9-A.1 限定回修记录（针对 `796fffd` 审查）
+
+用户限定审查确认基础组件已交付，但指出两处应先修复的代码问题。本回修只改
+`journal.py` / `test_e1_journal.py` / 本报告三文件；**不改 E1.8、不改生产执行流程、不进入 E1.9-B、不重审整体设计**。
+B2 信任边界结论（§1.2 / §7 / §8）不变——本次回修不涉及该问题，也不以任何方式掩盖它。
+
+### 9.1 问题一：外层与 envelope 的 `operation_id` 未绑定
+- **问题**：`append()` 用外层 `operation_id` 参数与 envelope 分别计算摘要/写辅助列，却不校验两者相等；
+  `_verify_entry()` 同样不校验。可构造"外层标 A、签名承诺 B"的有效签名记录，导致按 `operation_id` 恢复时身份歧义。
+- **修复（写入侧）**：`append()` 在取事务前即校验 `envelope["operation_id"]` 为非空字符串且等于外层参数，
+  不符立即抛 `JournalError`。
+- **修复（读取侧，独立）**：`_verify_entry()` 独立复验 `entry["envelope"]["operation_id"] == entry["operation_id"]`，
+  不符抛 `JournalIntegrityError`。该检查不依赖写入入口——即使有人绕过 `append()` 直接写入一条自洽签名的错配记录，
+  任何读取/完整性校验路径仍会 fail-closed。
+- **测试**：`test_append_rejects_operation_id_binding_mismatch`（append 拒绝）、
+  `test_verify_entry_independently_rejects_operation_id_binding`（伪造自洽签名对象被读取路径独立拒绝）。
+
+### 9.2 问题二：未签名 SQLite 辅助列参与安全敏感决策
+- **问题**：`journal_entries` 的 `operation_id`/`phase`/`executor_id`/`entry_digest` 辅助列未签名。
+  原 `_executor_id_for()` 从辅助列 `executor_id` 读取并决定 RESULT 继承的身份；
+  而 `verify_integrity()` 只读 `entry_json`，不核对辅助列。直接改辅助列即可影响身份继承而完整性检查无感。
+- **修复（决策源）**：删除 `_executor_id_for()`，改为 `_executor_id_from_signed_intent()`——从匹配 INTENT 的
+  **已签名 `entry_json`** 读取 `executor_id`，且读取时对该 entry 重新执行 `_verify_entry()`（字段集/摘要/签名/身份绑定全验），
+  验证通过才继承。辅助列改写无法改变继承结果。
+- **修复（完整性核对）**：`verify_integrity()` 追加读取辅助列，并逐条严格核对五个辅助列与签名 `entry_json` 完全一致；
+  任一分歧抛 `JournalIntegrityError`。辅助列仍保留为查询索引，但**不再是任何安全决策的信任来源**。
+- **测试**：`test_verify_detects_tampered_helper_column`（仅改辅助列 → verify 拒绝）、
+  `test_result_inheritance_ignores_tampered_helper_column`（辅助列被改为 attacker 时 RESULT 仍继承签名对象中的 honest）。
+
+### 9.3 回修后测试结果
+- Journal 定向：`PYTHONPATH=src .venv/Scripts/python -m unittest tests.test_e1_journal -v` → **16/16 OK**
+  （J01–J10 + 2 原负向 + 4 个 A.1 负向）。
+- Python 全量：`PYTHONPATH=src .venv/Scripts/python -m unittest discover -s tests` → **210/210 OK**
+  （基线 194 + A 阶段 12 + A.1 新增 4）；`git diff --cached --check` = 0。
+- 改动范围核验：仅三文件；`executor.py`/`execution_store.py`/门禁/凭据/E1.8/Rust 均未触碰。

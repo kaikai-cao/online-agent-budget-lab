@@ -12,8 +12,13 @@ What this component provides (verifiable in this environment):
     per-seq historical snapshot (``checkpoint_at(seq)``);
   * full-prefix integrity verification (``verify_integrity``): re-derives every
     digest/signature, checks seq continuity, prev_digest linkage, phase order
-    (INTENT before RESULT), and checkpoint->head binding; any mismatch raises
+    (INTENT before RESULT), checkpoint->head binding, AND that the unsigned
+    SQLite helper columns match the signed entry_json; any mismatch raises
     ``JournalIntegrityError`` (fail-closed);
+  * identity & helper-column hardening (E1.9-A.1): the outer ``operation_id`` is
+    bound to the envelope's ``operation_id`` both on append and on verify; and
+    RESULT's inherited ``executor_id`` is read from the signed INTENT entry_json
+    (re-verified on read), never from an unsigned SQLite helper column;
   * physical separation: the Journal lives in its own SQLite file injected by
     the caller, with its own signing key, independent of the Executor DB.
 
@@ -242,6 +247,17 @@ class AuthorityJournal:
             raise JournalError("operation_id must be a non-empty string")
         if not isinstance(envelope, Mapping):
             raise JournalError("envelope must be a mapping")
+        # E1.9-A.1 fix #1: the outer operation_id MUST equal the operation_id
+        # committed inside the signed envelope. Otherwise an entry can carry
+        # identity A in its signed header while promising envelope identity B,
+        # causing ambiguity for every downstream lookup keyed by operation_id.
+        env_op = envelope.get("operation_id")
+        if not isinstance(env_op, str) or not env_op:
+            raise JournalError("envelope.operation_id must be a non-empty string")
+        if env_op != operation_id:
+            raise JournalError(
+                "envelope.operation_id must equal the outer operation_id argument"
+            )
 
         with self._db() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -254,23 +270,18 @@ class AuthorityJournal:
                     last["entry_json"]
                 )
 
-                # INTENT must precede its RESULT (E1.8 §7.1).
-                if phase == "RESULT":
-                    has_intent = con.execute(
-                        "SELECT 1 FROM journal_entries WHERE operation_id=? AND phase='INTENT' LIMIT 1",
-                        (operation_id,),
-                    ).fetchone()
-                    if has_intent is None:
-                        raise JournalError("RESULT append requires a prior INTENT for operation_id")
-
-                # executor_id: taken from envelope for INTENT, inherited from the
-                # matching INTENT for RESULT (E1.8 JournalEntry carries executor_id).
+                # E1.9-A.1 fix #2: executor_id is taken from the SIGNED envelope
+                # for INTENT and inherited from the SIGNED prior INTENT entry_json
+                # for RESULT. The unsigned SQLite helper columns are indexes only
+                # and must never decide a security-sensitive credential field.
                 if phase == "INTENT":
                     payload_digest = _intent_payload_digest(envelope)  # validates exact shape first
                     executor_id = envelope["executor_id"]
                     env_obj = dict(envelope)
                 else:
-                    executor_id = self._executor_id_for(con, operation_id)
+                    # INTENT-before-RESULT (E1.8 §7.1) and identity inheritance
+                    # are both resolved from verified, signed entry_json.
+                    executor_id = self._executor_id_from_signed_intent(con, operation_id)
                     payload_digest = _result_payload_digest(envelope)
                     env_obj = dict(envelope)
 
@@ -314,15 +325,29 @@ class AuthorityJournal:
                 raise
         return entry
 
-    def _executor_id_for(self, con: sqlite3.Connection, operation_id: str) -> str:
-        row = con.execute(
-            "SELECT executor_id FROM journal_entries "
-            "WHERE operation_id=? AND phase='INTENT' ORDER BY seq ASC LIMIT 1",
+    def _executor_id_from_signed_intent(
+        self, con: sqlite3.Connection, operation_id: str
+    ) -> str:
+        """Resolve the RESULT's executor_id from the SIGNED INTENT entry_json.
+
+        The unsigned ``executor_id`` helper column is never trusted: mutating it
+        in SQLite cannot change what a RESULT inherits. Candidate rows are still
+        located by indexed helper columns, but the value is read from the signed
+        ``entry_json`` and the located entry is re-verified (field set, digests,
+        signature and operation_id binding) before its executor_id is used.
+        A tampered or unsigned INTENT therefore fails closed here.
+        """
+        rows = con.execute(
+            "SELECT seq, entry_json FROM journal_entries "
+            "WHERE operation_id=? AND phase='INTENT' ORDER BY seq ASC",
             (operation_id,),
-        ).fetchone()
-        if row is None:
-            raise JournalError("cannot inherit executor_id: no INTENT for operation_id")
-        return row["executor_id"]
+        ).fetchall()
+        for row in rows:
+            entry = json.loads(row["entry_json"])
+            self._verify_entry(entry)  # fail closed on any tampered signed object
+            if entry["operation_id"] == operation_id and entry["phase"] == "INTENT":
+                return entry["executor_id"]
+        raise JournalError("cannot inherit executor_id: no valid signed INTENT for operation_id")
 
     def _make_checkpoint(
         self, con: sqlite3.Connection, seq: int, journal_head_digest: str
@@ -401,6 +426,14 @@ class AuthorityJournal:
         if not enc.is_sha256(entry["prev_digest"]) or not enc.is_sha256(entry["payload_digest"]):
             raise JournalIntegrityError("entry digest fields are not sha256")
 
+        # E1.9-A.1 fix #1 (read path, independent of append): the outer
+        # operation_id is part of the signed unsigned_entry, and the envelope
+        # carries its own operation_id inside payload_digest. Both must match,
+        # otherwise a validly signed entry can still have ambiguous identity.
+        env = entry["envelope"]
+        if not isinstance(env, Mapping) or env.get("operation_id") != entry["operation_id"]:
+            raise JournalIntegrityError("entry operation_id not bound to envelope operation_id")
+
         # envelope -> payload_digest (E1.8 §5.2 recovery completeness check)
         if entry["phase"] == "INTENT":
             expected_payload = _intent_payload_digest(entry["envelope"])
@@ -421,14 +454,16 @@ class AuthorityJournal:
     def verify_integrity(self) -> int:
         """Verify the ENTIRE log prefix; return the number of entries.
 
-        Checks, in order: seq continuity from 1, prev_digest linkage (including
-        genesis), per-entry digest/signature/envelope, INTENT-before-RESULT,
+        Checks, in order: unsigned helper columns == signed entry_json, seq
+        continuity from 1, prev_digest linkage (including genesis), per-entry
+        digest/signature/envelope (+ operation_id binding), INTENT-before-RESULT,
         one checkpoint per seq, checkpoint digest/signature, and checkpoint
         -> entry_digest head binding. Any failure raises JournalIntegrityError.
         """
         with self._db() as con:
             entry_rows = con.execute(
-                "SELECT entry_json FROM journal_entries ORDER BY seq ASC"
+                "SELECT seq, operation_id, phase, executor_id, entry_digest, entry_json "
+                "FROM journal_entries ORDER BY seq ASC"
             ).fetchall()
             cp_rows = con.execute(
                 "SELECT checkpoint_json FROM journal_checkpoints ORDER BY seq ASC"
@@ -436,6 +471,18 @@ class AuthorityJournal:
 
         entries = [json.loads(r["entry_json"]) for r in entry_rows]
         checkpoints = [json.loads(r["checkpoint_json"]) for r in cp_rows]
+
+        # E1.9-A.1 fix #2: the unsigned SQLite helper columns are indexes only.
+        # They MUST agree with the signed entry_json, otherwise an attacker could
+        # rewrite executor_id/operation_id/phase in the helper column to steer
+        # the lookup while the signed object still verifies. Strictly cross-check
+        # them here so any such divergence fails closed.
+        for row, entry in zip(entry_rows, entries):
+            for col in ("seq", "operation_id", "phase", "executor_id", "entry_digest"):
+                if row[col] != entry[col]:
+                    raise JournalIntegrityError(
+                        f"unsigned helper column {col} diverges from signed entry at seq {row['seq']}"
+                    )
 
         if not entries:
             if checkpoints:
