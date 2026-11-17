@@ -13,6 +13,11 @@
 > head/查找/候选选择改由**已签名 JSON 内的 seq** 决定，SQL 辅助 seq 只作候选定位并逐一核对，分歧 fail-closed；
 > `verify_integrity()` 补齐 checkpoint 辅助 seq 核对。不重开已通过的 A.1 身份绑定问题、不重审 E1.9 设计、
 > 不改摘要域/签名结构、不动 E1.8/Executor。修复细节与测试数字见第 10 节。
+>
+> **E1.9-A.3 限定回修**（针对 `7d46fea` 的审查）：仅补同一类问题的最后一处——`append()` 选择当前尾记录
+> （据此决定下一 seq 与 prev_digest）时仍在用未签名 SQL `ORDER BY seq DESC LIMIT 1`；改为按**已签名 JSON 内的 seq**
+> 取尾记录并核对辅助 seq，分歧在任何 INSERT 之前 fail-closed，杜绝分叉 seq。不重开 A.1/A.2 已通过项、
+> 不重审设计、不改摘要域/签名结构、不动 E1.8/Executor。修复细节与测试数字见第 11 节。
 
 ## 1. 信任边界与部署架构
 
@@ -40,9 +45,9 @@
 
 | 文件 | 类型 | 说明 |
 |---|---|---|
-| `src/online_budget/journal.py` | 新增 | 权威 Journal 核心组件（约 460 行） |
-| `tests/test_e1_journal.py` | 新增 | J01–J10 及负向测试（22 个用例，含 A.1 新增 4 个、A.2 新增 6 个） |
-| `docs/E1_9_A_JOURNAL_FOUNDATION.md` | 新增 | 本验收报告（含第 9 节 A.1、第 10 节 A.2 回修记录） |
+| `src/online_budget/journal.py` | 新增 | 权威 Journal 核心组件（约 490 行） |
+| `tests/test_e1_journal.py` | 新增 | J01–J10 及负向测试（23 个用例，含 A.1 新增 4 个、A.2 新增 6 个、A.3 新增 1 个） |
+| `docs/E1_9_A_JOURNAL_FOUNDATION.md` | 新增 | 本验收报告（含第 9 节 A.1、第 10 节 A.2、第 11 节 A.3 回修记录） |
 
 未修改：`executor.py`、`execution_store.py`、`e1_runtime.py`、`cross_layer_bridge.py`、`e1_receipts.py`、
 任何 D10/D11 源文件、任何 E1.5 门禁代码、E1.8 冻结文档、Rust crate。
@@ -86,8 +91,10 @@
 - `checkpoint_signature = Ed25519_sign(authority, canonical_json({"domain":"e1-journal-checkpoint-sign-v1","checkpoint_digest":checkpoint_digest}))`
 
 **每次 append 的落库顺序**（Journal 自身单文件 `BEGIN IMMEDIATE` 事务内）：
-分配 `seq=max+1` → 校验 RESULT 前置 INTENT → 构造并签名 entry → INSERT entry → 生成并签名该 seq 的 checkpoint → INSERT checkpoint → COMMIT。
-该事务**只在 Journal 文件内**，**不声称**与 Executor DB 的跨存储原子性（E1.9 §2.4）。
+读取全部 entry → 逐条验签 → 核辅助 seq == 签名 seq → 按**已签名 seq** 取尾记录（A.3）→ 分配 `seq=尾+1`、`prev_digest=尾.entry_digest`
+→ 校验 RESULT 前置 INTENT → 构造并签名 entry → INSERT entry → 生成并签名该 seq 的 checkpoint → INSERT checkpoint → COMMIT。
+尾记录选择绝不读未签名 SQL `ORDER BY seq`；辅助 seq 分歧在任何 INSERT 前 fail-closed（抛 `JournalIntegrityError`），
+事务回滚、不新增 entry/checkpoint，杜绝"两条同签名 seq"分叉。该事务**只在 Journal 文件内**，**不声称**与 Executor DB 的跨存储原子性（E1.9 §2.4）。
 
 **恢复/读取校验（fail-closed）**：
 `verify_integrity()` 逐条检查 seq 连续、prev_digest 链接（含创世）、envelope→payload_digest 重算、entry_digest 重算、
@@ -95,6 +102,7 @@ entry_signature 验签、INTENT 先于 RESULT、checkpoint 数量对齐、checkp
 checkpoint 与同 seq 的 entry_digest 绑定；`head()`/`checkpoint_at(seq)`/`entries_from(seq)` 读取时同样验签。
 A.2 起，所有读取决策（范围/顺序/head/查找/RESULT 的 INTENT 候选选择）一律以**已签名 JSON 内的 seq** 为准，
 SQL 辅助 `seq` 列只作候选定位并逐一与签名对象核对，任何分歧 fail-closed（详见第 10 节）。
+A.3 起，追加入口的**尾记录选择**同样改由已签名 seq 决定并核对辅助 seq，不再用未签名 SQL 排序（详见第 11 节）。
 
 ## 4. J01–J10 测试结果
 
@@ -116,7 +124,8 @@ SQL 辅助 `seq` 列只作候选定位并逐一与签名对象核对，任何分
 另外 2 个负向用例：无 INTENT 的 RESULT 被拒、INTENT envelope 字段集错误被拒，均 PASS。
 E1.9-A.1 新增 4 个负向用例（外层/envelope operation_id 绑定 2 个、辅助列信任 2 个，见第 9 节），均 PASS。
 E1.9-A.2 新增 6 个负向用例（辅助 seq 篡改 4 个、签名 seq 排序 2 个，见第 10 节），均 PASS。
-**小计 22/22 通过（A.2 回修后）。**
+E1.9-A.3 新增 1 个负向用例（篡改尾记录辅助 seq → append 拒绝且无分叉/无写入，见第 11 节），PASS。
+**小计 23/23 通过（A.3 回修后）。**
 
 ## 5. 重启恢复与篡改检测证据
 - 重启恢复：J05 用新 `AuthorityJournal` 实例重开同一文件，`verify_integrity()` 通过、
@@ -148,7 +157,8 @@ E1.9-A.2 新增 6 个负向用例（辅助 seq 篡改 4 个、签名 seq 排序 
    改动前基线 `PYTHONPATH=src .venv/Scripts/python -m unittest discover -s tests` = **194/194 OK**；
    A.1 回修前完整全量（含 J01–J10 与 2 负向用例）= **206/206 OK**；
    A.1 回修后完整全量（含新增 4 负向用例）= **210/210 OK**；
-   A.2 回修后完整全量（含新增 6 负向用例）= **216/216 OK**（`git diff --cached --check` = 0，见第 10 节）。
+   A.2 回修后完整全量（含新增 6 负向用例）= **216/216 OK**；
+   A.3 回修后完整全量（含新增 1 负向用例）= **217/217 OK**（`git diff --cached --check` = 0，见第 11 节）。
 
 ## 8. 通过标准对照
 要求："Journal 作为独立组件具备完整的追加、签名、检查点、恢复和验证能力，且其持久化信任边界满足 B2 的基本要求。否则不能进入下一阶段。"
@@ -226,3 +236,31 @@ SQL 辅助 `seq` 列只用于候选定位，并逐一与签名对象核对，任
 - Journal 定向：**22/22 OK**（J01–J10 + 2 原负向 + 4 个 A.1 负向 + 6 个 A.2 负向）。
 - Python 全量：**216/216 OK**（基线 194 + A 阶段 12 + A.1 新增 4 + A.2 新增 6）；`git diff --cached --check` = 0。
 - 改动范围核验：仅 `journal.py` / `test_e1_journal.py` / 本报告三文件；E1.8/生产执行流程/门禁/凭据/Rust 均未触碰。
+
+## 11. E1.9-A.3 限定回修记录（针对 `7d46fea` 审查）
+
+用户限定复核确认 A.2 的六项测试与主要读取路径修复有效，但指出**同一类问题的最后一处遗漏**：`append()` 选择
+当前尾记录时仍用未签名 SQL `ORDER BY seq DESC LIMIT 1`。本次只补这一处；**不重开 A.1/A.2 已通过项、
+不重审 E1.9 设计、不改摘要域/签名结构、不动 E1.8/Executor**。B2 信任边界结论（§1.2 / §7 / §8）不变，本次不触及。
+
+### 11.1 问题：append 尾记录选择仍依赖未签名 SQL seq
+- **问题**：原 `append()` 在 `BEGIN IMMEDIATE` 内用
+  `SELECT entry_json FROM journal_entries ORDER BY seq DESC LIMIT 1` 取尾记录，再据其签名 JSON 的 `seq` 计算下一 seq、
+  据其 `entry_digest` 计算 prev_digest。若把最新记录的辅助 `seq` 改为 0（对应的 checkpoint 辅助 seq 亦改为 0），
+  SQL 排序会读到签名 seq 更小的记录，算出重复的签名 seq 并成功追加，形成"两条同签名 seq"分叉——完整性检查虽最终能发现，
+  但分叉追加已经发生。
+- **修复（新增 `_tail_entry()`）**：在 `BEGIN IMMEDIATE` 事务内读取全部 entry → 逐条 `_verify_entry()` →
+  核对辅助 `seq` == 签名 `seq`（不符抛 `JournalIntegrityError`）→ 按**已签名 seq** 排序取最大者作为尾记录。
+  `append()` 据此计算下一 seq 与 prev_digest，不再执行任何基于未签名 SQL `seq` 的排序/`LIMIT`。
+- **失败原子性**：尾记录核对发生在任何 INSERT 之前；一旦 fail-closed，外层 `except` 回滚事务，
+  **不新增 JournalEntry、不新增 Checkpoint**，因此无法写入分叉 seq。
+- **附带清理**：删除已无引用的 `_entry_digest_from_json()` 私有静态方法（尾记录的 `entry_digest` 现直接从已签名对象取）。
+- **测试**：`test_append_detects_tampered_tail_helper_seq_no_fork`——把最新 entry 与其 checkpoint 的辅助 seq 改为 0，
+  `append()` 被 `JournalIntegrityError` 拒绝，且 `journal_entries`/`journal_checkpoints` 计数不变（无写入、无分叉）；
+  另以干净文件对照验证正常追加仍产生 seq 1、2 且完整性通过。
+
+### 11.2 回修后测试结果
+- Journal 定向：**23/23 OK**（J01–J10 + 2 原负向 + 4 个 A.1 负向 + 6 个 A.2 负向 + 1 个 A.3 负向）。
+- Python 全量：**217/217 OK**（基线 194 + A 阶段 12 + A.1 新增 4 + A.2 新增 6 + A.3 新增 1）。
+- 改动范围核验：仅 `journal.py` / `test_e1_journal.py` / 本报告三文件；E1.8/生产执行流程/门禁/凭据/Rust 均未触碰。
+- 边界不变：B2 独立抗回滚信任域仍未落实（§1.2 / §7 / §8 结论未改、未掩盖）；本轮属限定回修，未进入 E1.9-B。

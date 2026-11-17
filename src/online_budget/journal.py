@@ -25,6 +25,10 @@ What this component provides (verifiable in this environment):
     Helper columns are only candidate locators and are cross-checked against the
     signed objects; any divergence fails closed; ``verify_integrity`` also
     cross-checks the checkpoint helper seq;
+  * append-tail hardening (E1.9-A.3): ``append`` selects the current tail by the
+    greatest SIGNED entry seq (cross-checking the helper seq), never by the
+    unsigned SQL ``seq`` column; a tampered helper seq fails closed BEFORE any
+    INSERT, so no duplicate signed seq (fork) can be appended;
   * physical separation: the Journal lives in its own SQLite file injected by
     the caller, with its own signing key, independent of the Executor DB.
 
@@ -268,13 +272,14 @@ class AuthorityJournal:
         with self._db() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
-                last = con.execute(
-                    "SELECT entry_json FROM journal_entries ORDER BY seq DESC LIMIT 1"
-                ).fetchone()
-                seq = 1 if last is None else int(json.loads(last["entry_json"])["seq"]) + 1
-                prev_digest = GENESIS_PREV_DIGEST if last is None else self._entry_digest_from_json(
-                    last["entry_json"]
-                )
+                # E1.9-A.3: the tail (and hence the next seq and prev_digest)
+                # MUST be decided by the SIGNED seq inside entry_json, never by
+                # the unsigned SQL helper seq. A tampered helper seq that would
+                # otherwise hide the real tail fails closed here, before any
+                # INSERT, so no forked seq can ever be appended.
+                last = self._tail_entry(con)
+                seq = 1 if last is None else int(last["seq"]) + 1
+                prev_digest = GENESIS_PREV_DIGEST if last is None else last["entry_digest"]
 
                 # E1.9-A.1 fix #2: executor_id is taken from the SIGNED envelope
                 # for INTENT and inherited from the SIGNED prior INTENT entry_json
@@ -331,6 +336,35 @@ class AuthorityJournal:
                 raise
         return entry
 
+    def _tail_entry(self, con: sqlite3.Connection) -> dict[str, Any] | None:
+        """Return the last entry by SIGNED seq, or None if the journal is empty.
+
+        E1.9-A.3: the unsigned SQLite ``seq`` helper column is NOT used to pick
+        the tail. We load every row, re-verify each signed object and cross-check
+        its helper seq, then choose the entry with the greatest SIGNED seq. Any
+        helper-seq divergence fails closed *before* ``append`` performs an
+        INSERT, so the surrounding ``BEGIN IMMEDIATE`` transaction rolls back
+        with no new entry and no new checkpoint (no forked seq). Candidate rows
+        are located by a full scan; this is the authoritative write path, so it
+        deliberately favours correctness over an index-only lookup.
+        """
+        rows = con.execute(
+            "SELECT seq, entry_json FROM journal_entries"
+        ).fetchall()
+        if not rows:
+            return None
+        verified: list[dict[str, Any]] = []
+        for row in rows:
+            entry = json.loads(row["entry_json"])
+            self._verify_entry(entry)  # fail closed on any tampered signed object
+            if row["seq"] != entry["seq"]:
+                raise JournalIntegrityError(
+                    f"helper seq diverges from signed entry seq at row {row['seq']}"
+                )
+            verified.append(entry)
+        verified.sort(key=lambda e: e["seq"])  # signed-object seq is authoritative
+        return verified[-1]
+
     def _executor_id_from_signed_intent(
         self, con: sqlite3.Connection, operation_id: str
     ) -> str:
@@ -380,10 +414,6 @@ class AuthorityJournal:
                 self._signing_key, _checkpoint_sign_message(cp_digest)
             ),
         }
-
-    @staticmethod
-    def _entry_digest_from_json(entry_json: str) -> str:
-        return json.loads(entry_json)["entry_digest"]
 
     # -- read paths (verify on read) --------------------------------------------
     def head(self) -> dict[str, Any]:

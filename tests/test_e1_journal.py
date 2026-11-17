@@ -418,6 +418,44 @@ class _JournalCase(unittest.TestCase):
             with self.assertRaises(JournalIntegrityError):
                 self.journal._executor_id_from_signed_intent(con, "opD2")
 
+    # -- E1.9-A.3: append tail chosen by SIGNED seq, not SQL seq --------------
+    def _counts(self):
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            e = con.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0]
+            c = con.execute("SELECT COUNT(*) FROM journal_checkpoints").fetchone()[0]
+        return e, c
+
+    def test_append_detects_tampered_tail_helper_seq_no_fork(self):
+        # Reproduce the reported attack: latest signed seq is 2. Tamper the
+        # latest entry's helper seq to 0 so an SQL ORDER BY seq would pick the
+        # seq-1 signed entry as tail and compute seq=2 again (fork). A.3 must
+        # fail closed at append time and must NOT write any entry/checkpoint.
+        self._append_pair(self.journal, "opTail", value=1)  # signed seq 1,2
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.execute("UPDATE journal_entries SET seq=0 WHERE seq=2")
+            con.execute("UPDATE journal_checkpoints SET seq=0 WHERE seq=2")
+            con.commit()
+        before = self._counts()
+        self.assertEqual(before, (2, 2))
+
+        reopened = self._open()
+        with self.assertRaises(JournalIntegrityError):
+            reopened.append(
+                phase="INTENT", operation_id="opFork", envelope=_intent("opFork")
+            )
+        # No new entry / checkpoint: append failed before INSERT.
+        self.assertEqual(self._counts(), before)
+
+        # A fresh, well-formed append still works on a clean tail (control case).
+        clean_path = self.dir / "clean.sqlite3"
+        fresh = AuthorityJournal(
+            clean_path, signing_key=self.key, verify_key=self.key.public_key()
+        )
+        e1 = fresh.append(phase="INTENT", operation_id="ok1", envelope=_intent("ok1"))
+        e2 = fresh.append(phase="RESULT", operation_id="ok1", envelope=_result("ok1"))
+        self.assertEqual((e1["seq"], e2["seq"]), (1, 2))
+        self.assertEqual(fresh.verify_integrity(), 2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
