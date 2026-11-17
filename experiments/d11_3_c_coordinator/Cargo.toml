@@ -14,3 +14,7 @@ ed25519-dalek = "=2.2.0"
 # this Fp. No Halo2 version is changed.
 ff = "=0.14.0"
 rand = { version = "=0.10.4", default-features = false, features = ["sys_rng"] }
+# E1.1 cross-language encoding layer (additive; no existing crate behaviour changes).
+serde_json = "=1.0.154"
+base64 = "=0.22.1"
+sha2 = "=0.10.9"
