@@ -19,6 +19,12 @@ What this component provides (verifiable in this environment):
     bound to the envelope's ``operation_id`` both on append and on verify; and
     RESULT's inherited ``executor_id`` is read from the signed INTENT entry_json
     (re-verified on read), never from an unsigned SQLite helper column;
+  * read-path seq hardening (E1.9-A.2): every read decision (range, order, head,
+    lookup, INTENT candidate selection) is made from the SIGNED seq inside
+    entry_json / checkpoint_json, never from the unsigned SQL ``seq`` column.
+    Helper columns are only candidate locators and are cross-checked against the
+    signed objects; any divergence fails closed; ``verify_integrity`` also
+    cross-checks the checkpoint helper seq;
   * physical separation: the Journal lives in its own SQLite file injected by
     the caller, with its own signing key, independent of the Executor DB.
 
@@ -337,16 +343,29 @@ class AuthorityJournal:
         signature and operation_id binding) before its executor_id is used.
         A tampered or unsigned INTENT therefore fails closed here.
         """
+        # E1.9-A.2: locate candidates by indexed helper columns, but ORDER and
+        # SELECT by the SIGNED seq inside entry_json, never the unsigned SQL
+        # seq. A tampered helper seq cannot make a later INTENT look earlier.
         rows = con.execute(
             "SELECT seq, entry_json FROM journal_entries "
-            "WHERE operation_id=? AND phase='INTENT' ORDER BY seq ASC",
+            "WHERE operation_id=? AND phase='INTENT'",
             (operation_id,),
         ).fetchall()
+        candidates = []
         for row in rows:
             entry = json.loads(row["entry_json"])
             self._verify_entry(entry)  # fail closed on any tampered signed object
             if entry["operation_id"] == operation_id and entry["phase"] == "INTENT":
-                return entry["executor_id"]
+                # Cross-check the locator column against the signed seq so a
+                # tampered helper seq cannot silently drop/alias a candidate.
+                if row["seq"] != entry["seq"]:
+                    raise JournalIntegrityError(
+                        "INTENT candidate helper seq diverges from signed seq"
+                    )
+                candidates.append(entry)
+        candidates.sort(key=lambda e: e["seq"])  # signed-object seq is authoritative
+        if candidates:
+            return candidates[0]["executor_id"]
         raise JournalError("cannot inherit executor_id: no valid signed INTENT for operation_id")
 
     def _make_checkpoint(
@@ -368,36 +387,72 @@ class AuthorityJournal:
 
     # -- read paths (verify on read) --------------------------------------------
     def head(self) -> dict[str, Any]:
-        with self._db() as con:
-            row = con.execute(
-                "SELECT checkpoint_json FROM journal_checkpoints ORDER BY seq DESC LIMIT 1"
-            ).fetchone()
-        if row is None:
-            raise JournalError("journal is empty: no head checkpoint")
-        checkpoint = json.loads(row["checkpoint_json"])
-        self._verify_checkpoint(checkpoint)
-        return checkpoint
-
-    def checkpoint_at(self, seq: int) -> dict[str, Any]:
-        with self._db() as con:
-            row = con.execute(
-                "SELECT checkpoint_json FROM journal_checkpoints WHERE seq=?", (seq,)
-            ).fetchone()
-        if row is None:
-            raise JournalError(f"no checkpoint at seq {seq}")
-        checkpoint = json.loads(row["checkpoint_json"])
-        self._verify_checkpoint(checkpoint)
-        return checkpoint
-
-    def entries_from(self, seq: int) -> list[dict[str, Any]]:
+        # E1.9-A.2: the head is the checkpoint with the greatest SIGNED seq,
+        # not whatever the unsigned SQL column sorts last. Load all checkpoints,
+        # verify each, cross-check helper seq, then pick by signed seq.
         with self._db() as con:
             rows = con.execute(
-                "SELECT entry_json FROM journal_entries WHERE seq>=? ORDER BY seq ASC", (seq,)
+                "SELECT seq, checkpoint_json FROM journal_checkpoints"
             ).fetchall()
-        entries = [json.loads(r["entry_json"]) for r in rows]
-        for entry in entries:
+        if not rows:
+            raise JournalError("journal is empty: no head checkpoint")
+        checkpoints: list[dict[str, Any]] = []
+        for row in rows:
+            cp = json.loads(row["checkpoint_json"])
+            self._verify_checkpoint(cp)
+            if row["seq"] != cp["seq"]:
+                raise JournalIntegrityError(
+                    f"checkpoint helper seq diverges from signed seq at row {row['seq']}"
+                )
+            checkpoints.append(cp)
+        checkpoints.sort(key=lambda c: c["seq"])
+        return checkpoints[-1]
+
+    def checkpoint_at(self, seq: int) -> dict[str, Any]:
+        # E1.9-A.2: locate by the SIGNED seq inside checkpoint_json, and require
+        # the SQL helper seq to match; a tampered index cannot alias a different
+        # (still validly signed) checkpoint into answering this seq.
+        with self._db() as con:
+            rows = con.execute(
+                "SELECT seq, checkpoint_json FROM journal_checkpoints"
+            ).fetchall()
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            cp = json.loads(row["checkpoint_json"])
+            self._verify_checkpoint(cp)
+            if row["seq"] != cp["seq"]:
+                raise JournalIntegrityError(
+                    f"checkpoint helper seq diverges from signed seq at row {row['seq']}"
+                )
+            if cp["seq"] == seq:
+                matches.append(cp)
+        if not matches:
+            raise JournalError(f"no checkpoint at seq {seq}")
+        matches.sort(key=lambda c: c["seq"])
+        return matches[0]
+
+    def entries_from(self, seq: int) -> list[dict[str, Any]]:
+        # E1.9-A.2: range and order are decided by the SIGNED seq inside
+        # entry_json, never by the unsigned SQL column. Reading WHERE seq>=?
+        # / ORDER BY seq from the helper column could silently skip a valid
+        # signed entry whose helper seq was tampered. We load all rows, verify
+        # each signed object, cross-check its helper seq, then filter/sort by
+        # the signed seq. Any divergence fails closed.
+        with self._db() as con:
+            rows = con.execute(
+                "SELECT seq, entry_json FROM journal_entries"
+            ).fetchall()
+        all_entries: list[dict[str, Any]] = []
+        for row in rows:
+            entry = json.loads(row["entry_json"])
             self._verify_entry(entry)
-        return entries
+            if row["seq"] != entry["seq"]:
+                raise JournalIntegrityError(
+                    f"helper seq diverges from signed entry seq at row {row['seq']}"
+                )
+            all_entries.append(entry)
+        all_entries.sort(key=lambda e: e["seq"])
+        return [e for e in all_entries if e["seq"] >= seq]
 
     # -- verification -----------------------------------------------------------
     def _verify_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
@@ -466,7 +521,7 @@ class AuthorityJournal:
                 "FROM journal_entries ORDER BY seq ASC"
             ).fetchall()
             cp_rows = con.execute(
-                "SELECT checkpoint_json FROM journal_checkpoints ORDER BY seq ASC"
+                "SELECT seq, checkpoint_json FROM journal_checkpoints ORDER BY seq ASC"
             ).fetchall()
 
         entries = [json.loads(r["entry_json"]) for r in entry_rows]
@@ -506,9 +561,15 @@ class AuthorityJournal:
         if len(checkpoints) != len(entries):
             raise JournalIntegrityError("checkpoint count does not match entry count")
         head_by_seq = {e["seq"]: e["entry_digest"] for e in entries}
-        for expected_seq, checkpoint in enumerate(checkpoints, start=1):
+        for expected_seq, (cp_row, checkpoint) in enumerate(zip(cp_rows, checkpoints), start=1):
             if checkpoint["seq"] != expected_seq:
                 raise JournalIntegrityError(f"checkpoint seq discontinuity at {expected_seq}")
+            # E1.9-A.2: cross-check the unsigned checkpoint helper seq against
+            # the signed checkpoint object (same hardening as journal_entries).
+            if cp_row["seq"] != checkpoint["seq"]:
+                raise JournalIntegrityError(
+                    f"checkpoint helper seq diverges from signed seq at {expected_seq}"
+                )
             self._verify_checkpoint(checkpoint)
             if checkpoint["journal_head_digest"] != head_by_seq.get(expected_seq):
                 raise JournalIntegrityError(

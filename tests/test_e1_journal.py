@@ -338,6 +338,86 @@ class _JournalCase(unittest.TestCase):
         stored = reopened.entries_from(2)[0]
         self.assertEqual(stored["executor_id"], "honest")
 
+    # -- E1.9-A.2: signed-object seq governs read decisions --------------------
+    def test_entries_from_detects_tampered_helper_seq(self):
+        # A tampered helper seq must not silently let a valid signed entry be
+        # skipped by a range query; the range is decided by the SIGNED seq and
+        # helper/signed divergence fails closed.
+        self._append_pair(self.journal, "opE", value=1)  # signed seq 1,2
+        self._append_pair(self.journal, "opF", value=2)  # signed seq 3,4
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.execute("UPDATE journal_entries SET seq=0 WHERE seq=2")
+            con.commit()
+        reopened = self._open()
+        with self.assertRaises(JournalIntegrityError):
+            reopened.entries_from(2)
+
+    def test_head_detects_tampered_checkpoint_seq(self):
+        # Make the newest checkpoint's helper seq look old; head must not return
+        # a stale (still validly signed) checkpoint from SQL ordering.
+        self._append_pair(self.journal, "opH1", value=1)  # cp seq 1,2
+        self._append_pair(self.journal, "opH2", value=2)  # cp seq 3,4
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.execute("UPDATE journal_checkpoints SET seq=0 WHERE seq=4")
+            con.commit()
+        reopened = self._open()
+        with self.assertRaises(JournalIntegrityError):
+            reopened.head()
+
+    def test_checkpoint_at_detects_tampered_checkpoint_seq(self):
+        self._append_pair(self.journal, "opCA", value=1)
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.execute("UPDATE journal_checkpoints SET seq=0 WHERE seq=2")
+            con.commit()
+        reopened = self._open()
+        with self.assertRaises(JournalIntegrityError):
+            reopened.checkpoint_at(2)
+
+    def test_verify_integrity_detects_tampered_checkpoint_seq(self):
+        # verify_integrity cross-checked entry helper columns since A.1 but not
+        # checkpoint helper seq; this closes that exact gap.
+        self._append_pair(self.journal, "opVI", value=1)
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.execute("UPDATE journal_checkpoints SET seq=99 WHERE seq=2")
+            con.commit()
+        reopened = self._open()
+        with self.assertRaises(JournalIntegrityError):
+            reopened.verify_integrity()
+
+    def test_executor_id_from_signed_intent_orders_by_signed_seq(self):
+        # Two INTENTs for one op: the earliest by SIGNED seq must win, not the
+        # one the helper column would sort first.
+        self.journal.append(
+            phase="INTENT", operation_id="opD", envelope=_intent("opD", executor="correct")
+        )
+        self.journal.append(
+            phase="INTENT", operation_id="opD", envelope=_intent("opD", executor="wrong")
+        )
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.row_factory = sqlite3.Row
+            got = self.journal._executor_id_from_signed_intent(con, "opD")
+        self.assertEqual(got, "correct")
+
+    def test_executor_id_from_signed_intent_detects_tampered_helper_seq(self):
+        # If a tampered helper seq makes the later (wrong) INTENT appear first,
+        # candidate selection must fail closed rather than inherit "wrong".
+        self.journal.append(
+            phase="INTENT", operation_id="opD2", envelope=_intent("opD2", executor="correct")
+        )
+        self.journal.append(
+            phase="INTENT", operation_id="opD2", envelope=_intent("opD2", executor="wrong")
+        )
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.execute(
+                "UPDATE journal_entries SET seq=0 "
+                "WHERE operation_id='opD2' AND executor_id='wrong'"
+            )
+            con.commit()
+        with closing(sqlite3.connect(self.journal_path)) as con:
+            con.row_factory = sqlite3.Row
+            with self.assertRaises(JournalIntegrityError):
+                self.journal._executor_id_from_signed_intent(con, "opD2")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

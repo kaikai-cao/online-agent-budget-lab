@@ -8,6 +8,11 @@
 > **E1.9-A.1 限定回修**（针对 `796fffd` 的审查）：修复两处代码问题——①外层与 envelope 的 `operation_id` 绑定；
 > ②未签名 SQLite 辅助列不得参与安全敏感决策。仅改 `journal.py` / `test_e1_journal.py` / 本报告三文件，
 > 不改 E1.8、不改生产执行流程、不进入 E1.9-B。修复细节与测试数字见第 9 节。
+>
+> **E1.9-A.2 限定回修**（针对 `8f17c33` 的审查）：仅处理同一类问题的读取路径遗漏——所有读取的范围/顺序/
+> head/查找/候选选择改由**已签名 JSON 内的 seq** 决定，SQL 辅助 seq 只作候选定位并逐一核对，分歧 fail-closed；
+> `verify_integrity()` 补齐 checkpoint 辅助 seq 核对。不重开已通过的 A.1 身份绑定问题、不重审 E1.9 设计、
+> 不改摘要域/签名结构、不动 E1.8/Executor。修复细节与测试数字见第 10 节。
 
 ## 1. 信任边界与部署架构
 
@@ -35,9 +40,9 @@
 
 | 文件 | 类型 | 说明 |
 |---|---|---|
-| `src/online_budget/journal.py` | 新增 | 权威 Journal 核心组件（约 410 行） |
-| `tests/test_e1_journal.py` | 新增 | J01–J10 及负向测试（16 个用例，含 A.1 新增 4 个） |
-| `docs/E1_9_A_JOURNAL_FOUNDATION.md` | 新增 | 本验收报告（含第 9 节 A.1 回修记录） |
+| `src/online_budget/journal.py` | 新增 | 权威 Journal 核心组件（约 460 行） |
+| `tests/test_e1_journal.py` | 新增 | J01–J10 及负向测试（22 个用例，含 A.1 新增 4 个、A.2 新增 6 个） |
+| `docs/E1_9_A_JOURNAL_FOUNDATION.md` | 新增 | 本验收报告（含第 9 节 A.1、第 10 节 A.2 回修记录） |
 
 未修改：`executor.py`、`execution_store.py`、`e1_runtime.py`、`cross_layer_bridge.py`、`e1_receipts.py`、
 任何 D10/D11 源文件、任何 E1.5 门禁代码、E1.8 冻结文档、Rust crate。
@@ -88,6 +93,8 @@
 `verify_integrity()` 逐条检查 seq 连续、prev_digest 链接（含创世）、envelope→payload_digest 重算、entry_digest 重算、
 entry_signature 验签、INTENT 先于 RESULT、checkpoint 数量对齐、checkpoint_digest 重算+验签、
 checkpoint 与同 seq 的 entry_digest 绑定；`head()`/`checkpoint_at(seq)`/`entries_from(seq)` 读取时同样验签。
+A.2 起，所有读取决策（范围/顺序/head/查找/RESULT 的 INTENT 候选选择）一律以**已签名 JSON 内的 seq** 为准，
+SQL 辅助 `seq` 列只作候选定位并逐一与签名对象核对，任何分歧 fail-closed（详见第 10 节）。
 
 ## 4. J01–J10 测试结果
 
@@ -108,7 +115,8 @@ checkpoint 与同 seq 的 entry_digest 绑定；`head()`/`checkpoint_at(seq)`/`e
 
 另外 2 个负向用例：无 INTENT 的 RESULT 被拒、INTENT envelope 字段集错误被拒，均 PASS。
 E1.9-A.1 新增 4 个负向用例（外层/envelope operation_id 绑定 2 个、辅助列信任 2 个，见第 9 节），均 PASS。
-**小计 16/16 通过（A.1 回修后）。**
+E1.9-A.2 新增 6 个负向用例（辅助 seq 篡改 4 个、签名 seq 排序 2 个，见第 10 节），均 PASS。
+**小计 22/22 通过（A.2 回修后）。**
 
 ## 5. 重启恢复与篡改检测证据
 - 重启恢复：J05 用新 `AuthorityJournal` 实例重开同一文件，`verify_integrity()` 通过、
@@ -139,7 +147,8 @@ E1.9-A.1 新增 4 个负向用例（外层/envelope operation_id 绑定 2 个、
 5. **系统测试基线**：本阶段仅新增独立模块与测试，未触碰任何现有生产代码。
    改动前基线 `PYTHONPATH=src .venv/Scripts/python -m unittest discover -s tests` = **194/194 OK**；
    A.1 回修前完整全量（含 J01–J10 与 2 负向用例）= **206/206 OK**；
-   A.1 回修后完整全量（含新增 4 负向用例）= **210/210 OK**（`git diff --cached --check` = 0，见第 9 节）。
+   A.1 回修后完整全量（含新增 4 负向用例）= **210/210 OK**；
+   A.2 回修后完整全量（含新增 6 负向用例）= **216/216 OK**（`git diff --cached --check` = 0，见第 10 节）。
 
 ## 8. 通过标准对照
 要求："Journal 作为独立组件具备完整的追加、签名、检查点、恢复和验证能力，且其持久化信任边界满足 B2 的基本要求。否则不能进入下一阶段。"
@@ -183,3 +192,37 @@ B2 信任边界结论（§1.2 / §7 / §8）不变——本次回修不涉及该
 - Python 全量：`PYTHONPATH=src .venv/Scripts/python -m unittest discover -s tests` → **210/210 OK**
   （基线 194 + A 阶段 12 + A.1 新增 4）；`git diff --cached --check` = 0。
 - 改动范围核验：仅三文件；`executor.py`/`execution_store.py`/门禁/凭据/E1.8/Rust 均未触碰。
+
+## 10. E1.9-A.2 限定回修记录（针对 `8f17c33` 审查）
+
+用户限定复核确认 A.1 两项修复有效，但指出**同一类问题的读取路径遗漏**：`journal_entries` 辅助列已纳入完整性
+核对，读取接口却仍用未签名 SQL 索引列决定范围/顺序；`journal_checkpoints` 的 SQL `seq` 未做同类核对。
+本次仅处理这一问题；**不重开已通过的 A.1 身份绑定、不重审 E1.9 设计、不改摘要域/签名结构、不动 E1.8/Executor**。
+B2 信任边界结论（§1.2 / §7 / §8）不变，本次不触及。
+
+### 10.1 统一原则
+所有读取决策（范围、顺序、head、查找、RESULT 的 INTENT 候选选择）一律以**已签名 JSON 对象内的 seq** 为准；
+SQL 辅助 `seq` 列只用于候选定位，并逐一与签名对象核对，任一分歧即 `JournalIntegrityError`（fail-closed）。
+
+### 10.2 逐项修复
+- **`entries_from(seq)`**：改为读取全部行 → 逐条验签 → 核对辅助 seq == 签名 seq → 按签名 seq 排序 →
+  按签名 seq 过滤 `>= seq`。篡改辅助 seq 不再能使有效签名记录被范围查询静默跳过（改用 `WHERE seq>=?`/`ORDER BY seq` 的旧行为）。
+- **`head()`**：改为读取全部 checkpoint → 逐条验签 → 核对辅助 seq → 按签名 seq 排序 → 取最大签名 seq。
+  篡改最新 checkpoint 的辅助 seq 不再能让旧的、签名仍有效的 checkpoint 被当作 head 返回。
+- **`checkpoint_at(seq)`**：改为按签名 `checkpoint["seq"]` 查找，并要求该行辅助 seq 一致；
+  辅助 seq 被篡改时不再把另一条（仍有效签名的）checkpoint 错误地识别为目标 seq。
+- **`verify_integrity()`**： checkpoint 核对循环追加读取 SQL 辅助 seq，逐条核对与签名 `checkpoint["seq"]` 一致
+  （补齐 A.1 只核对 `journal_entries` 辅助列、未核对 checkpoint 辅助 seq 的缺口）。
+- **`_executor_id_from_signed_intent()`**：候选定位仍用辅助列，但去掉 `ORDER BY seq`（辅助列），
+  改为逐条验签 + 核对辅助 seq → 按签名 seq 排序 → 取最早 INTENT。篡改辅助 seq 使较晚 INTENT 看似更早时 fail-closed。
+
+### 10.3 新增 6 个负向测试
+`test_entries_from_detects_tampered_helper_seq`、`test_head_detects_tampered_checkpoint_seq`、
+`test_checkpoint_at_detects_tampered_checkpoint_seq`、`test_verify_integrity_detects_tampered_checkpoint_seq`、
+`test_executor_id_from_signed_intent_orders_by_signed_seq`（两 INTENT 取签名 seq 最早者）、
+`test_executor_id_from_signed_intent_detects_tampered_helper_seq`。均 PASS。
+
+### 10.4 回修后测试结果
+- Journal 定向：**22/22 OK**（J01–J10 + 2 原负向 + 4 个 A.1 负向 + 6 个 A.2 负向）。
+- Python 全量：**216/216 OK**（基线 194 + A 阶段 12 + A.1 新增 4 + A.2 新增 6）；`git diff --cached --check` = 0。
+- 改动范围核验：仅 `journal.py` / `test_e1_journal.py` / 本报告三文件；E1.8/生产执行流程/门禁/凭据/Rust 均未触碰。
