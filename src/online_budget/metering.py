@@ -185,24 +185,38 @@ class MeteringPolicy:
         return {**self.unsigned_payload(), "signature_b64": self.signature_b64}
 
 
+# Module-private construction token. This is an API-level guard, NOT a security
+# boundary against arbitrary in-process code (Python cannot provide one). It
+# closes the normal-API hole where a caller could manufacture a "verified"
+# policy by passing a forged policy plus a self-computed, unkeyed SHA-256 digest.
+_VERIFIED_POLICY_TOKEN = object()
+
+
 class VerifiedMeteringPolicy:
     """An Issuer-verified policy; the ONLY type cost/issue/verify accept.
 
     This is intentionally NOT a dataclass: ``dataclasses.replace()`` cannot
-    clone it, so there is no public way to manufacture a "verified" policy with
-    a modified fee table. It is constructed solely by
-    :func:`verify_metering_policy` after the Ed25519 signature check succeeds.
+    clone it. Construction additionally requires a module-private token, so the
+    only normal-API path in is :func:`verify_metering_policy` after the Ed25519
+    signature check succeeds. A forged policy plus a freshly computed (unkeyed)
+    SHA-256 digest therefore cannot produce this type.
 
-    The object is immutable by convention (private slots, no setters) and keeps
-    a private digest that was computed from the exact verified content. Every
-    consumer re-checks that the current payload still hashes to that digest, so
-    even in-process mutation attempts are detected (fail closed).
+    This is an API-level guarantee, not a cryptographic or process-isolation
+    one: this module does not defend against arbitrary in-process code. The
+    object is immutable by convention (private slots, no setters) and keeps a
+    private digest bound to the exact verified content; every consumer re-checks
+    that digest (fail closed).
     """
 
     __slots__ = ("_policy", "_digest")
 
-    def __init__(self, policy: MeteringPolicy, digest: str) -> None:
-        # Private constructor: callers must go through verify_metering_policy().
+    def __init__(
+        self, policy: MeteringPolicy, digest: str, *, _token: object = None,
+    ) -> None:
+        if _token is not _VERIFIED_POLICY_TOKEN:
+            raise MeteringError(
+                "VerifiedMeteringPolicy can only be created by verify_metering_policy()"
+            )
         object.__setattr__(self, "_policy", policy)
         object.__setattr__(self, "_digest", digest)
 
@@ -382,7 +396,7 @@ def verify_metering_policy(
         verify_signature(issuer_public_key, policy.signature_b64, message)
         # Bind the exact signed content into a sealed digest at verification time.
         digest_value = enc.canonical_digest(POLICY_DOMAIN, policy.unsigned_payload())
-        return VerifiedMeteringPolicy(policy, digest_value)
+        return VerifiedMeteringPolicy(policy, digest_value, _token=_VERIFIED_POLICY_TOKEN)
     except (MeteringError, TypeError, ValueError):
         return None
 

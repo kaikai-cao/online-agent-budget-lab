@@ -412,19 +412,42 @@ class MeteringTests(unittest.TestCase):
         with self.assertRaises(m.MeteringError):
             m.compute_cost(self.TOOL_NAME, self.schema_hash, forged_raw)
 
-    def test_verified_policy_integrity_fail_closed(self):
-        # Even fabricating a "verified" object that keeps the old sealed digest
-        # while swapping in a tampered fee table must fail: the digest was bound
-        # to the original signed content at verification time.
-        forged = m.VerifiedMeteringPolicy(
-            replace(self.policy, entries=(
-                m.PolicyEntry(self.TOOL_NAME, self.schema_hash, 999),
-            )),
-            self.verified_policy.digest,
-        )
-        self.assertFalse(forged.integrity_ok())
+    def test_verified_policy_direct_construction_rejected(self):
+        # API-level guard: a caller may not manufacture the verified type by
+        # passing its own policy plus a digest it computed itself (unkeyed
+        # SHA-256). The only normal-API path in is verify_metering_policy().
         with self.assertRaises(m.MeteringError):
-            m.compute_cost(self.TOOL_NAME, self.schema_hash, forged)
+            m.VerifiedMeteringPolicy(self.policy, self.verified_policy.digest)
+        with self.assertRaises(m.MeteringError):
+            m.VerifiedMeteringPolicy(
+                self.policy, m.compute_metering_policy_digest(self.policy)
+            )
+
+    def test_forged_policy_with_recomputed_digest_cannot_become_verified(self):
+        # The exact review attack: tamper the fee table, recompute the public
+        # digest, then try to construct a verified object directly. Neither the
+        # constructor nor the Issuer-verification path may accept it.
+        forged_raw = replace(self.policy, entries=(
+            m.PolicyEntry(self.TOOL_NAME, self.schema_hash, 999),
+        ))
+        forged_digest = m.compute_metering_policy_digest(forged_raw)
+        with self.assertRaises(m.MeteringError):
+            m.VerifiedMeteringPolicy(forged_raw, forged_digest)
+        self.assertIsNone(
+            m.verify_metering_policy(forged_raw, self.issuer_key.public_key())
+        )
+        with self.assertRaises(m.MeteringError):
+            m.compute_cost(self.TOOL_NAME, self.schema_hash, forged_raw)
+
+    def test_issuer_verified_policy_still_computes_cost(self):
+        # Normal path is untouched: Issuer verification yields the sealed type
+        # and compute_cost reads the signed fee from it.
+        self.assertIsInstance(self.verified_policy, m.VerifiedMeteringPolicy)
+        self.assertTrue(self.verified_policy.integrity_ok())
+        self.assertEqual(
+            m.compute_cost(self.TOOL_NAME, self.schema_hash, self.verified_policy),
+            self.COST,
+        )
 
     # --------------------------------------------- E1.2 review fix: block 2
     def test_scope_P_policy_mismatch_rejected(self):
