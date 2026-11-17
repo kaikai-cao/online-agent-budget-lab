@@ -465,6 +465,40 @@ fn s01_same_scope_different_budget_is_conflict_with_no_partial_write() {
     cleanup(&f.path);
 }
 
+#[test]
+fn s02_same_scope_same_budget_different_binding_digest_is_conflict_with_no_partial_write() {
+    let f = setup("s02");
+    // Same scope key (global/lease/period) AND same budget_id as the honest
+    // registration done in setup(), but a different Issuer-signed field:
+    // online_lease_grant_digest is changed, so binding_record_digest differs.
+    let mut rec2 = binding_record_for(&f.witness, "issuer-e13-test", &f.auth_bytes);
+    rec2.online_lease_grant_digest = sha("online-lease-grant-CHANGED");
+    let rec2 = sign_binding_record(rec2, &f.issuer);
+    assert_eq!(rec2.budget_id, f.binding_record.budget_id);
+    assert_eq!(rec2.global_budget_id, f.binding_record.global_budget_id);
+    assert_eq!(rec2.lease_id, f.binding_record.lease_id);
+    assert_eq!(rec2.period_id, f.binding_record.period_id);
+    assert_ne!(
+        rec2.online_lease_grant_digest,
+        f.binding_record.online_lease_grant_digest
+    );
+
+    let result = f.coordinator.register_e1(&rec2, &f.auth_bytes);
+    assert!(
+        matches!(result, Err(E1Error::ScopeConflict(_))),
+        "expected SCOPE_CONFLICT, got {result:?}"
+    );
+
+    // Original registration must be unchanged: no partial write / overwrite.
+    let store = StateStore::open(&f.path).unwrap();
+    let stored = store
+        .get_cross_layer_scope(&f.witness.budget_id, &f.witness.period_id)
+        .unwrap()
+        .expect("original scope must still be present");
+    assert_eq!(stored.online_lease_grant_digest, sha("online-lease-grant"));
+    cleanup(&f.path);
+}
+
 // ------------------------------------------------- A: attestation cross-language //
 
 #[test]

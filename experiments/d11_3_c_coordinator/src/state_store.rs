@@ -365,22 +365,27 @@ impl StateStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Same scope key -> either identical (Duplicate) or a conflict.
-        if let Some(existing) = tx
+        // Same scope key -> byte-identical repeat (Duplicate) or a conflict.
+        // Both budget_id AND binding_record_digest must match for a repeat;
+        // changing an Issuer-signed field such as online_lease_grant_digest or
+        // metering_policy_digest yields a different digest and is a conflict.
+        if let Some((existing_budget_id, existing_binding_digest)) = tx
             .query_row(
-                "SELECT budget_id FROM cross_layer_scopes \
+                "SELECT budget_id, binding_record_digest FROM cross_layer_scopes \
              WHERE global_budget_id = ?1 AND lease_id = ?2 AND period_id = ?3",
                 params![scope.global_budget_id, scope.lease_id, scope.period_id_hex,],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(StoreError::from)?
         {
-            if existing == scope.budget_id_hex {
+            if existing_budget_id == scope.budget_id_hex
+                && existing_binding_digest.as_str() == binding_record_digest
+            {
                 return Err(StoreError::Duplicate);
             }
             return Err(StoreError::Conflict(
-                "scope key maps to a different budget_id".to_owned(),
+                "scope key maps to a different budget_id or binding record digest".to_owned(),
             ));
         }
         // Register the D11 instance (only if absent) and the scope atomically.
