@@ -553,17 +553,32 @@ class E1ExecutionGateTests(unittest.TestCase):
         self.assertEqual(receipt["payload"]["status"], "SUCCEEDED")
         self.assertEqual(receipt["payload"]["receipt_version"], 1)
 
-    def test_c24_capability_is_one_shot_and_bound_to_its_operation(self):
-        """A minted capability cannot be replayed or reused for another binding."""
+    def test_c24_no_capability_issuer_and_real_token_cannot_replay(self):
+        """No reusable issuer method exists; the real path's token is single-use.
+
+        The capability used by a real ``execute_e1`` call is captured via a spy
+        on ``_dispatch_and_seal`` (no direct construction). It must have been
+        consumed by the real path, and cannot drive a second dispatch.
+        """
         ex = self._executor()
-        cap = ex._issue_dispatch_capability(
-            self._reconstruct_binding(),
-            BudgetReceipt.from_dict(self.pending.d10_budget_receipt),
-        )
-        # Consume once through a valid E1 call path is covered by c11; here the
-        # token itself must be single-use even across direct helper calls.
-        ex._dispatch_and_seal(**self._direct_dispatch_kwargs(), _capability=cap)
+        # No instance-level method accepts arbitrary binding/receipt to mint a
+        # capability -- that was the bypass the review flagged.
+        self.assertFalse(hasattr(ex, "_issue_dispatch_capability"))
+        captured: list = []
+        real = ex._dispatch_and_seal
+
+        def spy(*args, **kwargs):
+            captured.append(kwargs.get("_capability"))
+            return real(*args, **kwargs)
+
+        ex._dispatch_and_seal = spy
+        self._run_e1(ex)  # normal E1 path creates + consumes a real capability
+        self.assertEqual(len(captured), 1)
+        cap = captured[0]
+        self.assertIsNotNone(cap)
+        self.assertTrue(cap.consumed)
         self.assertEqual(ex.counter.dispatch_count, 1)
+        # The consumed token cannot drive another dispatch.
         with self.assertRaises(ToolExecutionDenied):
             ex._dispatch_and_seal(**self._direct_dispatch_kwargs(), _capability=cap)
         self.assertEqual(ex.counter.dispatch_count, 1)

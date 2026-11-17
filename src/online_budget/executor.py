@@ -293,19 +293,6 @@ class TrustedToolExecutor:
             raise ToolExecutionDenied("actual dispatch arguments differ from ToolCallBinding")
         return safe_arguments
 
-    def _issue_dispatch_capability(
-        self, binding: ToolCallBinding, receipt: BudgetReceipt,
-    ) -> _DispatchCapability:
-        """Mint a one-shot dispatch capability.
-
-        INTERNAL ONLY. Call this only after the full admission chain for this
-        exact ``binding`` + ``receipt`` has passed (legacy D10 _verify_admission,
-        or all four E1 gates). Never expose a capability to the public API.
-        """
-        return _DispatchCapability(
-            self, binding.binding_digest, receipt.receipt_digest, _DISPATCH_CAPABILITY_SEAL
-        )
-
     def _dispatch_and_seal(
         self, *, binding: ToolCallBinding, safe_arguments: dict[str, Any],
         receipt: BudgetReceipt, authorization_digest: str | None,
@@ -313,13 +300,13 @@ class TrustedToolExecutor:
     ) -> dict[str, Any]:
         """Shared dispatch + D10 Execution Receipt v2 sealing (fifth relation).
 
-        Reached ONLY through a one-shot capability minted by
-        :meth:`_issue_dispatch_capability` after the caller has verified its
-        full admission chain: the legacy D10 path verifies
-        ``request_digest = executor_admission_digest`` in :meth:`_verify_admission`;
-        the E1 path independently verifies ``request_digest = D_E`` after all
-        four gates. This helper never decides the admission digest -- it only
-        seals and verifies the execution result, committing
+        Reached ONLY through a one-shot capability constructed INLINE inside
+        :meth:`execute` (after the full legacy D10 admission chain) or
+        :meth:`execute_e1` (after all four E1 gates). There is deliberately NO
+        instance-level ``_issue_dispatch_capability`` method: exposing one that
+        accepts arbitrary ``binding``/``receipt`` would merely move the bypass
+        entry point one call earlier. This helper never decides the admission
+        digest -- it only seals and verifies the execution result, committing
         ``budget_receipt_digest = receipt.receipt_digest`` (E0 §6.2.1 fifth
         relation) and, for v2, the verified authorization digest.
         """
@@ -423,9 +410,12 @@ class TrustedToolExecutor:
                 else ExecutorAuthorization.from_dict(executor_authorization)
             )
             authorization_digest = auth.authorization_digest
-        # All D10 admission checks passed -- mint the one-shot capability here,
-        # only for this verified binding + receipt.
-        capability = self._issue_dispatch_capability(binding, receipt)
+        # All D10 admission checks passed -- construct the one-shot capability
+        # inline here (no reusable issuer method). Only this verified binding +
+        # receipt can be sealed by this token.
+        capability = _DispatchCapability(
+            self, binding.binding_digest, receipt.receipt_digest, _DISPATCH_CAPABILITY_SEAL
+        )
         return self._dispatch_and_seal(
             binding=binding, safe_arguments=safe_arguments, receipt=receipt,
             authorization_digest=authorization_digest, _capability=capability,
@@ -577,11 +567,13 @@ class TrustedToolExecutor:
         except E1ExecutionDenied as exc:
             raise ToolExecutionDenied(f"E1 D11 Transition Receipt rejected: {exc}") from exc
 
-        # All four gates passed: mint the one-shot capability for this verified
-        # binding + receipt, then dispatch once and seal the D10 Execution
-        # Receipt v2 (which commits both the Budget Receipt digest and the
-        # verified authorization digest).
-        capability = self._issue_dispatch_capability(binding, budget_receipt)
+        # All four gates passed: construct the one-shot capability inline for
+        # this verified binding + receipt (no reusable issuer method), then
+        # dispatch once and seal the D10 Execution Receipt v2 (which commits
+        # both the Budget Receipt digest and the verified authorization digest).
+        capability = _DispatchCapability(
+            self, binding.binding_digest, budget_receipt.receipt_digest, _DISPATCH_CAPABILITY_SEAL
+        )
         return self._dispatch_and_seal(
             binding=binding, safe_arguments=safe_arguments, receipt=budget_receipt,
             authorization_digest=auth.authorization_digest, _capability=capability,
