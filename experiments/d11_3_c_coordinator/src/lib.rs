@@ -11,6 +11,7 @@ use ff::PrimeField;
 use halo2_proofs::pasta::Fp;
 
 pub mod coordinator;
+pub mod e1;
 pub mod e1_encoding;
 pub mod proof_verifier;
 pub mod registration;
