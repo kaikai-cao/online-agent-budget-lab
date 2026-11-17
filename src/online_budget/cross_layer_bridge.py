@@ -16,9 +16,13 @@ Trust and logging rules (E1.0 §B / E1.4 task A):
   logged; request/response payloads are never logged.
 * On any uncertain failure (timeout, EOF, non-zero exit, response-id
   mismatch) the bridge marks itself unavailable and never silently re-sends
-  the business request. A new process is obtained through :meth:`restart`,
-  after which :meth:`submit_transition_e1` is refused until a successful
-  :meth:`get_operation` proves whether the prior operation committed.
+  the business request. An uncertain failure specifically on
+  ``submit_transition_e1`` also arms the recovery gate: submits are refused
+  until a successful :meth:`get_operation` proves whether the prior operation
+  committed. The gate survives both :meth:`restart` and :meth:`start` (a
+  restart via ``start()`` must not bypass recovery); only :meth:`get_operation`
+  clears it. A well-formed ``ok:false`` (``ServiceError``) is a definitive
+  service rejection, not a transport fault, and does not arm the gate.
 
 Windows note: ``selectors`` cannot watch a subprocess pipe reliably, so a
 dedicated reader thread feeds a :class:`queue.Queue` and reads use a bounded
@@ -133,7 +137,7 @@ class CrossLayerBridge:
 
     @property
     def must_recover(self) -> bool:
-        """True after a restart, until a successful ``get_operation`` check."""
+        """True after a restart or uncertain submit, until ``get_operation`` succeeds."""
         with self._state_lock:
             return self._must_recover
 
@@ -168,8 +172,9 @@ class CrossLayerBridge:
             self._spawn()
             # Probe with the (shorter) startup deadline; a bad config exits 2.
             self._request("health", {}, timeout=self._startup_timeout)
-            with self._state_lock:
-                self._must_recover = False
+            # Do NOT clear a recovery gate here. An uncertain D11 submit must
+            # stay gated even if the caller reconnects via start() instead of
+            # restart(); only a successful get_operation() may clear it.
             _LOG.info("e1_service ready")
 
     def _spawn(self) -> None:
@@ -298,6 +303,33 @@ class CrossLayerBridge:
         return f"e14-{uuid.uuid4().hex[:8]}-{n}"
 
     def _request(
+        self,
+        method: str,
+        payload: Mapping[str, Any],
+        *,
+        timeout: float | None = None,
+        allow_null_result: bool = False,
+    ) -> dict[str, Any] | None:
+        """Send one request; arm the recovery gate on an uncertain D11 submit.
+
+        E1.0 §B.6: any uncertain fault on ``submit_transition_e1`` (timeout,
+        EOF, non-zero exit, write failure, response mismatch) leaves the D11
+        commit outcome unknown. Gate future submits until ``get_operation``
+        resolves it. ``ServiceError`` is a well-formed rejection, NOT a
+        transport fault, so it is deliberately not caught here.
+        """
+        try:
+            return self._request_once(
+                method, payload, timeout=timeout, allow_null_result=allow_null_result
+            )
+        except BridgeUnavailable:
+            if method == "submit_transition_e1":
+                with self._state_lock:
+                    self._must_recover = True
+                _LOG.warning("uncertain submit result: recovery gate armed")
+            raise
+
+    def _request_once(
         self,
         method: str,
         payload: Mapping[str, Any],

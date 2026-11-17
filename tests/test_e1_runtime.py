@@ -36,6 +36,7 @@ from online_budget.e1_encoding import canonical_digest, fp_from_hex, fp_to_hex
 from online_budget.e1_runtime import (
     CROSS_LAYER_ADMISSION_DOMAIN,
     E1FailClosed,
+    E1SubmitIndeterminate,
     PendingExecution,
     compute_cross_layer_admission_digest,
     run_tool_call_e1,
@@ -525,6 +526,191 @@ class E1RuntimeIntegrationTests(unittest.TestCase):
             self._run(bridge=fake)
         self.assertIn("PROOF_INVALID", str(ctx.exception))
         self.assertEqual(fake.restart_calls, 0)
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+    def test_d08_store_error_after_commit_restores_receipt_via_get_operation(self):
+        """§B.5: STORE_ERROR is not a refusal; query and restore the stored receipt."""
+
+        class StoreErrorAfterCommit:
+            def __init__(self, real):
+                self.real = real
+                self.lookups = 0
+
+            def prove(self, witness):
+                return self.real.prove(witness)
+
+            def restart(self):
+                self.real.restart()
+
+            def get_operation(self, **kwargs):
+                self.lookups += 1
+                return self.real.get_operation(**kwargs)
+
+            def submit_transition_e1(self, payload):
+                self.real.submit_transition_e1(payload)  # really commits
+                raise ServiceError("STORE_ERROR", "store acknowledged late")
+
+        fake = StoreErrorAfterCommit(self.bridge)
+        dispatched = []
+        self.executor.execute = lambda **kw: dispatched.append(kw)
+        pending = self._run(bridge=fake)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(fake.lookups, 1)
+        self.assertTrue(pending.recovered)
+        self.assertEqual(pending.d11_transition_receipt["operation_id"], OPERATION_ID)
+        self.assertEqual(
+            pending.d11_transition_receipt["binding_digest"],
+            pending.metering_attestation["attestation"]["binding_digest"],
+        )
+        # One D10 charge; the stored D11 receipt was restored, not re-submitted.
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+    def test_d09_state_conflict_hit_restores_and_miss_fails_closed(self):
+        """§B.5: STATE_CONFLICT queries by original id; hit restores, miss fails closed."""
+
+        class StateConflictHit:
+            def __init__(self, real):
+                self.real = real
+                self.lookups = 0
+
+            def prove(self, witness):
+                return self.real.prove(witness)
+
+            def restart(self):
+                self.real.restart()
+
+            def get_operation(self, **kwargs):
+                self.lookups += 1
+                return self.real.get_operation(**kwargs)
+
+            def submit_transition_e1(self, payload):
+                self.real.submit_transition_e1(payload)  # commit, then report conflict
+                raise ServiceError("STATE_CONFLICT", "state already advanced")
+
+        hit = StateConflictHit(self.bridge)
+        restored = self._run(bridge=hit)
+        self.assertTrue(restored.recovered)
+        self.assertEqual(hit.lookups, 1)
+        self.assertEqual(restored.d11_transition_receipt["operation_id"], OPERATION_ID)
+        self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
+
+        # Miss case: exercise the shared recovery helper directly. This is the
+        # exact code both the first-submit and re-submit ServiceError paths use.
+        from online_budget.e1_runtime import (
+            _AdmissionArtifacts,
+            _restore_from_idempotent_lookup,
+        )
+        from online_budget.metering import issue_metering_attestation, verify_metering_policy
+        from online_budget.tool_binding import build_tool_call_binding, snapshot_arguments
+
+        verified = verify_metering_policy(self.policy, self.issuer.public_key())
+        binding = build_tool_call_binding(
+            operation_id=OPERATION_ID,
+            gateway_id=GATEWAY_ID,
+            coordinator_id=COORDINATOR_ID,
+            online_lease_grant=self.lease,
+            execution_grant=self.execution,
+            tool_name="invoice_review",
+            tool_schema_hash=self.schema_hash,
+            arguments=snapshot_arguments(ARGS),
+            executor_id=EXECUTOR_ID,
+        )
+        att = issue_metering_attestation(
+            executor_private_key=self.executor_key,
+            executor_id=EXECUTOR_ID,
+            operation_id=OPERATION_ID,
+            binding=binding,
+            authorization=self.authorization,
+            tool_name="invoice_review",
+            tool_schema_hash=self.schema_hash,
+            budget_scope=self.budget_scope,
+            verified_policy=verified,
+            issued_at=self.now - 10,
+            expires_at=self.now + 600,
+        )
+        artifacts = _AdmissionArtifacts(
+            operation_id=OPERATION_ID,
+            binding_digest=binding.binding_digest,
+            metering_attestation=att,
+            metering_quote_digest="sha256:" + "0" * 64,
+            cross_layer_digest="sha256:" + "0" * 64,
+            d10_budget_receipt={"payload": {"request_digest": "sha256:" + "0" * 64}},
+            prove_witness={},
+            instance=[],
+        )
+
+        class MissingLookup:
+            def __init__(self):
+                self.lookups = 0
+
+            def get_operation(self, **kwargs):
+                self.lookups += 1
+                return None
+
+        miss = MissingLookup()
+        with self.assertRaises(E1FailClosed) as ctx:
+            _restore_from_idempotent_lookup(
+                bridge=miss, artifacts=artifacts, budget_scope=self.budget_scope, code="STATE_CONFLICT"
+            )
+        self.assertIn("no committed receipt", str(ctx.exception))
+        self.assertEqual(miss.lookups, 1)
+
+    def test_d10_ambiguous_error_uncertain_lookup_is_indeterminate(self):
+        """If the idempotent query itself is uncertain, state is unknown -> no dispatch."""
+
+        class UncertainLookup:
+            def __init__(self, real):
+                self.real = real
+
+            def prove(self, witness):
+                return self.real.prove(witness)
+
+            def restart(self):
+                self.real.restart()
+
+            def get_operation(self, **kwargs):
+                raise BridgeTimeout("lookup response lost")
+
+            def submit_transition_e1(self, payload):
+                raise ServiceError("STORE_ERROR", "maybe committed")
+
+        with self.assertRaises(E1SubmitIndeterminate) as ctx:
+            self._run(bridge=UncertainLookup(self.bridge))
+        self.assertIn("STORE_ERROR", str(ctx.exception))
+        self.assertEqual(ctx.exception.operation_id, OPERATION_ID)
+
+    def test_d11_resubmit_store_error_also_resolves_by_lookup(self):
+        """The _recover_submit re-submit path must also query on STORE_ERROR."""
+
+        class UncertainThenStoreError:
+            def __init__(self, real):
+                self.real = real
+                self.submit_n = 0
+                self.lookups = 0
+
+            def prove(self, witness):
+                return self.real.prove(witness)
+
+            def restart(self):
+                self.real.restart()
+
+            def get_operation(self, **kwargs):
+                self.lookups += 1
+                return self.real.get_operation(**kwargs)
+
+            def submit_transition_e1(self, payload):
+                self.submit_n += 1
+                if self.submit_n == 1:
+                    raise BridgeTimeout("lost first submit response")
+                self.real.submit_transition_e1(payload)  # second submit commits
+                raise ServiceError("STORE_ERROR", "commit ack lost")
+
+        fake = UncertainThenStoreError(self.bridge)
+        pending = self._run(bridge=fake)
+        self.assertEqual(fake.submit_n, 2)
+        self.assertEqual(fake.lookups, 2)  # one after restart, one for STORE_ERROR
+        self.assertTrue(pending.recovered)
+        self.assertEqual(pending.d11_transition_receipt["operation_id"], OPERATION_ID)
         self.assertEqual(self.coordinator.assert_invariants()["global_used_count"], 1)
 
     def test_d07_expired_attestation_after_uncertain_submit_fails_closed(self):

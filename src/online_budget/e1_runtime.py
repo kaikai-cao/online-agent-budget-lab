@@ -21,6 +21,11 @@ Trust boundary:
   (regenerating the proof only because the new process has new proving keys).
   An expired attestation fails closed with the charged-but-uncommitted state
   reported explicitly. No tool dispatch occurs on any failure path.
+* The explicit ``STATE_CONFLICT`` / ``STORE_ERROR`` codes (E1.0 §B.5) are NOT
+  treated as definitive refusals: on both the first submit and the re-submit
+  path they trigger an idempotent ``get_operation`` lookup. A consistent hit
+  is restored, a miss or uncertain lookup fails closed. All other explicit
+  rejections (e.g. ``PROOF_INVALID``) fail closed without any re-submit.
 """
 
 from __future__ import annotations
@@ -55,6 +60,13 @@ from .tool_binding import (
 
 # Frozen domain prefix (E1.0 §6.1 / E1.1 §C.5). Distinct from every other domain.
 CROSS_LAYER_ADMISSION_DOMAIN = "agent-e0-cross-layer-admission-v1"
+
+# E1.0 §B.5: these two codes do NOT prove the transition failed. The store may
+# already hold a committed receipt, so the original operation must be queried
+# by idempotent lookup (§B.6) before any fail-closed conclusion. Every other
+# explicit service rejection (PROOF_INVALID, ATTESTATION_INVALID,
+# IDEMPOTENCY_CONFLICT, ...) remains a definitive refusal -> fail closed.
+IDEMPOTENT_QUERY_CODES = frozenset({"STATE_CONFLICT", "STORE_ERROR"})
 
 
 class E1RuntimeError(RuntimeError):
@@ -234,6 +246,70 @@ def _check_transition_receipt(
 
 
 # --------------------------------------------------------------------------- #
+# Recovery: E1.0 §B.5 / §B.6 idempotent lookup on ambiguous service errors
+# --------------------------------------------------------------------------- #
+def _restore_from_idempotent_lookup(
+    *,
+    bridge: Any,
+    artifacts: _AdmissionArtifacts,
+    budget_scope: BudgetScope,
+    code: str,
+) -> dict[str, Any]:
+    """Resolve ``STATE_CONFLICT`` / ``STORE_ERROR`` via ``get_operation`` (§B.5).
+
+    These codes do not prove the transition failed: the store may already hold
+    a committed receipt. Query with the ORIGINAL operation keys. A consistent
+    hit is returned as the authoritative stored receipt; a miss fails closed
+    (no fake receipt); an uncertain query leaves the state unknown and is
+    reported as :class:`E1SubmitIndeterminate`. This function never re-signs,
+    never re-charges D10 and never dispatches.
+    """
+    try:
+        stored = bridge.get_operation(
+            operation_id=artifacts.operation_id,
+            binding_digest=artifacts.binding_digest,
+            metering_quote_digest=artifacts.metering_quote_digest,
+        )
+    except Exception as exc:  # the query itself is uncertain -> state unknown
+        raise E1SubmitIndeterminate(
+            f"D11 {code}: idempotent lookup outcome unknown: {type(exc).__name__}",
+            operation_id=artifacts.operation_id,
+        ) from exc
+    if stored is None:
+        raise E1FailClosed(
+            f"D11 {code}: get_operation found no committed receipt; "
+            "fail closed, no fake receipt, no dispatch"
+        )
+    # A hit must still match the original operation fields. A mismatch is an
+    # IDEMPOTENCY_CONFLICT (§B.6), fail closed rather than trusting the store.
+    _check_transition_receipt(stored, artifacts, budget_scope=budget_scope)
+    return dict(stored)
+
+
+def _pending_from_stored_receipt(
+    *,
+    artifacts: _AdmissionArtifacts,
+    receipt: dict[str, Any],
+    tool_name: str,
+    arguments: dict[str, Any],
+    binding_payload: dict[str, Any],
+) -> PendingExecution:
+    """Wrap an idempotently-restored receipt as a pending (never dispatched) op."""
+    return PendingExecution(
+        operation_id=artifacts.operation_id,
+        tool_name=tool_name,
+        arguments=arguments,
+        binding=binding_payload,
+        metering_attestation=artifacts.metering_attestation.as_dict(),
+        metering_quote_digest=artifacts.metering_quote_digest,
+        cross_layer_digest=artifacts.cross_layer_digest,
+        d10_budget_receipt=artifacts.d10_budget_receipt,
+        d11_transition_receipt=receipt,
+        recovered=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Recovery: §B.6.1 rules 2-5
 # --------------------------------------------------------------------------- #
 def _recover_submit(
@@ -297,7 +373,24 @@ def _recover_submit(
             }
         )
     except ServiceError as exc:
-        # Explicit refusal on the re-submit is definitive; report and stop.
+        if exc.code in IDEMPOTENT_QUERY_CODES:
+            # Same §B.5 rule on the re-submit path: a store-level conflict or
+            # error may hide an already-committed operation. Query before
+            # concluding; never re-sign or re-charge D10.
+            stored = _restore_from_idempotent_lookup(
+                bridge=bridge,
+                artifacts=artifacts,
+                budget_scope=budget_scope,
+                code=exc.code,
+            )
+            return _pending_from_stored_receipt(
+                artifacts=artifacts,
+                receipt=stored,
+                tool_name="",  # filled by caller-level wrapper below
+                arguments={},
+                binding_payload={},
+            )
+        # Other explicit refusals are definitive; report and stop.
         raise E1FailClosed(
             f"D11 re-submit rejected ({exc.code}): {exc.message}; "
             "D10 charged, D11 not committed"
@@ -497,9 +590,27 @@ def run_tool_call_e1(
         )
         recovered = False
     except ServiceError as exc:
-        # A well-formed ok:false rejection (PROOF_INVALID, ATTESTATION_INVALID,
-        # IDEMPOTENCY_CONFLICT, ...) is a definitive D11 refusal, not an
-        # uncertain transport fault. Fail closed; do not restart/re-submit.
+        if exc.code in IDEMPOTENT_QUERY_CODES:
+            # §B.5: STATE_CONFLICT / STORE_ERROR do not prove the transition
+            # failed. The store may already hold a committed receipt. Query by
+            # the original operation keys and restore on a consistent hit;
+            # a miss or uncertain lookup fails closed (no fake receipt).
+            stored = _restore_from_idempotent_lookup(
+                bridge=bridge,
+                artifacts=artifacts,
+                budget_scope=budget_scope,
+                code=exc.code,
+            )
+            return _pending_from_stored_receipt(
+                artifacts=artifacts,
+                receipt=stored,
+                tool_name=tool_name,
+                arguments=dict(safe_arguments),
+                binding_payload=binding.payload(),
+            )
+        # Every other well-formed ok:false rejection (PROOF_INVALID,
+        # ATTESTATION_INVALID, IDEMPOTENCY_CONFLICT, ...) is definitive: fail
+        # closed, do not restart or blindly re-submit.
         raise E1FailClosed(f"D11 rejected the transition ({exc.code}): {exc.message}") from exc
     except BridgeUnavailable:
         # Only uncertain transport faults justify restart + get_operation

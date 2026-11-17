@@ -171,6 +171,56 @@ class CrossLayerBridgeTests(unittest.TestCase):
         self.assertFalse(bridge.must_recover)
         self.assertEqual(bridge.prove({"after": True}), {"echo": {"after": True}})
 
+    def test_t10_start_does_not_bypass_recovery_gate_after_uncertain_submit(self):
+        """An uncertain submit arms the gate; start() must not clear it.
+
+        Only a successful get_operation() may clear the gate, regardless of
+        whether the caller used start() or restart() to obtain a new process.
+        """
+
+        class DropFirstSubmit(CrossLayerBridge):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.drop_next_submit = True
+
+            def _request_once(self, method, payload, *, timeout=None, allow_null_result=False):
+                if method == "submit_transition_e1" and self.drop_next_submit:
+                    self.drop_next_submit = False
+                    self.mark_unavailable("simulated lost submit response")
+                    raise BridgeTimeout("simulated lost submit response")
+                return super()._request_once(
+                    method, payload, timeout=timeout, allow_null_result=allow_null_result
+                )
+
+        bridge = DropFirstSubmit(_spawn_cmd(self.script), timeout=3, startup_timeout=3)
+        bridge.start()
+        self.addCleanup(bridge.close)
+        self.assertFalse(bridge.must_recover)  # fresh bridge: normal ops allowed
+
+        with self.assertRaises(BridgeTimeout):
+            bridge.submit_transition_e1({"op": "x"})
+        self.assertFalse(bridge.available)
+        self.assertTrue(bridge.must_recover)  # uncertain submit armed the gate
+
+        # Reconnect via start() (NOT restart()) -- gate must survive.
+        bridge.start()
+        self.assertTrue(bridge.available)
+        self.assertTrue(bridge.must_recover)
+        with self.assertRaises(BridgeUnavailable):
+            bridge.submit_transition_e1({"op": "y"})
+
+        # Only a successful get_operation() clears the gate.
+        bridge.get_operation(
+            operation_id="op-x",
+            binding_digest="sha256:" + "0" * 64,
+            metering_quote_digest="sha256:" + "0" * 64,
+        )
+        self.assertFalse(bridge.must_recover)
+        self.assertEqual(
+            bridge.submit_transition_e1({"op": "z"}),
+            {"echo": {"op": "z"}},
+        )
+
     # ---- no secrets in requests -------------------------------------------
     def test_t09_request_payload_has_no_private_key_fields(self):
         captured: list[str] = []
