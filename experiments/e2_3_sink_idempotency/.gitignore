@@ -1,0 +1,7 @@
+# Regenerated per-trial working artifacts (authoritative data lives in
+# trials.csv / summary.json / raw.json one level up).
+results/*/work/
+
+# Python bytecode
+__pycache__/
+*.py[cod]

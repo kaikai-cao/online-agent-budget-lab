@@ -1,0 +1,77 @@
+{
+  "V0": {
+    "attempts": 10,
+    "valid": 10,
+    "crash_point_confirmed": 10,
+    "journal_intent_count_at_crash": 10,
+    "journal_result_count_at_crash": 0,
+    "execution_store_record_exists_at_crash": 0,
+    "sink_effect_count_before_retry": 10,
+    "sink_effect_count_after_retry": 20,
+    "dispatch_count_before_retry": 10,
+    "dispatch_count_after_retry": 20,
+    "retry_returned": 10,
+    "receipt_signature_valid": 10,
+    "receipt_binding_consistent": 10,
+    "receipt_result_matches_sink": 0,
+    "recovery_classes": {
+      "EFFECT_REPEATED": 10
+    }
+  },
+  "V1": {
+    "attempts": 10,
+    "valid": 10,
+    "crash_point_confirmed": 10,
+    "journal_intent_count_at_crash": 10,
+    "journal_result_count_at_crash": 0,
+    "execution_store_record_exists_at_crash": 0,
+    "sink_effect_count_before_retry": 10,
+    "sink_effect_count_after_retry": 10,
+    "dispatch_count_before_retry": 10,
+    "dispatch_count_after_retry": 20,
+    "retry_returned": 10,
+    "receipt_signature_valid": 10,
+    "receipt_binding_consistent": 10,
+    "receipt_result_matches_sink": 10,
+    "recovery_classes": {
+      "SINK_DEDUP_NO_REPEAT": 10
+    }
+  },
+  "V2": {
+    "attempts": 10,
+    "valid": 10,
+    "crash_point_confirmed": 10,
+    "journal_intent_count_at_crash": 10,
+    "journal_result_count_at_crash": 0,
+    "execution_store_record_exists_at_crash": 0,
+    "sink_effect_count_before_retry": 10,
+    "sink_effect_count_after_retry": 10,
+    "dispatch_count_before_retry": 10,
+    "dispatch_count_after_retry": 20,
+    "retry_returned": 10,
+    "receipt_signature_valid": 10,
+    "receipt_binding_consistent": 10,
+    "receipt_result_matches_sink": 0,
+    "recovery_classes": {
+      "IDEMPOTENCY_CONFLICT_REJECTED": 10
+    }
+  },
+  "special_checks": {
+    "concurrency": {
+      "requests": 8,
+      "executed": 1,
+      "dedup_hits": 7,
+      "committed_effects": 1,
+      "dispatch_count": 8,
+      "passed": true
+    },
+    "rollback": {
+      "first_outcome": "ROLLED_BACK",
+      "record_absent_after_rollback": true,
+      "effect_zero_after_rollback": true,
+      "second_outcome": "EXECUTED",
+      "effect_after_retry": 1,
+      "passed": true
+    }
+  }
+}

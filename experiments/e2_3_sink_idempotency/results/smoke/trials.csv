@@ -1,0 +1,4 @@
+variant,trial_id,operation_id,worker_pid,worker_exit_code,crash_point_confirmed,journal_intent_count,journal_result_count,execution_store_record_exists,sink_effect_count_before_retry,sink_effect_count_after_retry,dispatch_count_before_retry,dispatch_count_after_retry,retry_returned,receipt_signature_valid,receipt_binding_consistent,receipt_result_matches_sink,receipt_identical_to_original,sink_outcomes,recovery_classification,error_code
+V0,v0-t00,e23-v0-t00-e2caf89a,26088,1,true,1,0,false,1,2,1,2,true,true,true,false,N/A_NO_ORIGINAL_AT_CRASH,EXECUTED,EFFECT_REPEATED,
+V1,v1-t00,e23-v1-t00-0c70d767,9836,1,true,1,0,false,1,1,1,2,true,true,true,true,N/A_NO_ORIGINAL_AT_CRASH,DEDUP_HIT,SINK_DEDUP_NO_REPEAT,
+V2,v2-t00,e23-v2-t00-2ecc9174,25828,1,true,1,0,false,1,1,1,2,true,true,true,false,N/A_NO_ORIGINAL_AT_CRASH,IDEMPOTENCY_KEY_CONFLICT,IDEMPOTENCY_CONFLICT_REJECTED,IDEMPOTENCY_KEY_CONFLICT
