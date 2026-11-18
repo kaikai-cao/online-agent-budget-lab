@@ -68,7 +68,10 @@ class ServiceRequest:
 
 
 _ALLOWED_METHODS = frozenset(
-    {"append_intent", "append_result", "get_entry", "get_checkpoint", "get_head", "verify_integrity"}
+    {
+        "append_intent", "append_result", "get_entry", "get_checkpoint", "get_head",
+        "verify_integrity", "get_entries_from",  # E1.9-C.1: read-only replay extension
+    }
 )
 
 
@@ -143,6 +146,8 @@ class JournalService:
             return self._get_head(caller)
         if method == "verify_integrity":
             return self._verify_integrity(caller)
+        if method == "get_entries_from":
+            return self._get_entries_from(params, caller)
         raise ServiceError("UNKNOWN_METHOD", f"unhandled method {method!r}")
 
     # -- writes -----------------------------------------------------------------
@@ -290,6 +295,29 @@ class JournalService:
             return {"checkpoint": self._journal.head()}
         except jmod.JournalError as exc:
             raise ServiceError("EMPTY_JOURNAL", str(exc)) from exc
+
+    def _get_entries_from(self, params: Mapping[str, Any], caller: CallerIdentity) -> dict[str, Any]:
+        """E1.9-C.1: read-only signed entries with seq >= the requested cursor.
+
+        This is a pure addition to the frozen six-method API -- it does not
+        change any existing method's semantics.  The underlying
+        ``AuthorityJournal.entries_from`` selects and orders by the SIGNED seq
+        inside entry_json (never the unsigned SQL helper index) and verifies
+        every entry's signature/digest before returning; any divergence fails
+        closed as a JournalIntegrityError.  Used by G2 BEHIND replay only.
+        """
+        self._authorizer.authorize_read(caller)
+        self._require_fields(params, {"seq"})
+        seq = params["seq"]
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
+            raise ServiceError("BAD_SEQ", "seq must be a positive integer")
+        try:
+            entries = self._journal.entries_from(seq)
+        except jmod.JournalIntegrityError as exc:
+            raise ServiceError("INTEGRITY_FAILURE", str(exc)) from exc
+        except jmod.JournalError as exc:
+            raise ServiceError("JOURNAL_ERROR", str(exc)) from exc
+        return {"entries": entries}
 
     def _verify_integrity(self, caller: CallerIdentity) -> dict[str, Any]:
         self._authorizer.authorize_read(caller)

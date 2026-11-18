@@ -297,6 +297,7 @@ class TrustedToolExecutor:
         self, *, binding: ToolCallBinding, safe_arguments: dict[str, Any],
         receipt: BudgetReceipt, authorization_digest: str | None,
         _capability: _DispatchCapability | None = None,
+        store_con=None, before_store_commit=None,
     ) -> dict[str, Any]:
         """Shared dispatch + D10 Execution Receipt v2 sealing (fifth relation).
 
@@ -356,6 +357,8 @@ class TrustedToolExecutor:
             execute=lambda: self.registry.dispatch(binding.tool_name, safe_arguments),
             make_receipt=make_receipt,
             now=now,
+            con=store_con,
+            before_commit=before_store_commit,
         )
         expected = {
             "executor_id": self.executor_id,
@@ -426,6 +429,7 @@ class TrustedToolExecutor:
         execution_grant: Mapping[str, Any],
         executor_authorization: ExecutorAuthorization | Mapping[str, Any],
         metering_policy: Any, budget_scope: BudgetScope | Mapping[str, Any],
+        store_con=None, before_store_commit=None,
     ) -> dict[str, Any]:
         """E1.5 final execution gate: verify all four pre-dispatch gates, then dispatch.
 
@@ -577,6 +581,7 @@ class TrustedToolExecutor:
         return self._dispatch_and_seal(
             binding=binding, safe_arguments=safe_arguments, receipt=budget_receipt,
             authorization_digest=auth.authorization_digest, _capability=capability,
+            store_con=store_con, before_store_commit=before_store_commit,
         )
 
     def verify_receipt(self, receipt: Mapping[str, Any], *, binding: ToolCallBinding) -> bool:

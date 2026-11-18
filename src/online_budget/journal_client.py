@@ -142,6 +142,20 @@ class JournalClient:
             raise JournalClientError("BAD_RESPONSE", "get_head returned no checkpoint")
         return dict(cp)
 
+    def get_entries_from(self, *, seq: int) -> list[dict[str, Any]]:
+        """E1.9-C.1: signed entries with seq >= ``seq`` (read-only replay API).
+
+        The service selects/orders by SIGNED seq and verifies every signature
+        before returning.  An empty list means the cursor is already at head.
+        """
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
+            raise ValueError("seq must be a positive int")
+        result = self._call("get_entries_from", {"seq": seq})
+        entries = result.get("entries")
+        if not isinstance(entries, list) or not all(isinstance(e, Mapping) for e in entries):
+            raise JournalClientError("BAD_RESPONSE", "get_entries_from returned no entry list")
+        return [dict(e) for e in entries]
+
     # -- helpers ----------------------------------------------------------------
 
     @staticmethod

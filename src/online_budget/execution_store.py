@@ -51,65 +51,161 @@ class ExecutionStore:
                 con.rollback()
             con.close()
 
+    @contextmanager
+    def write_transaction(self):
+        """A1 write lock on the REAL ExecutionStore database (E1.9-C.1 C2).
+
+        ``BEGIN IMMEDIATE`` is acquired before the caller does any dedup / Journal
+        query / INTENT append, held across dispatch + RESULT and released only at
+        commit/rollback.  This -- NOT a lock on a separate E1CLocalState DB -- is
+        the A1 shared-store serialization boundary.  The Journal is a SEPARATE
+        store: there is no cross-store atomicity between it and this transaction
+        (E1.9 plan §2.4).  This gives shared-store serialization only, never G1b.
+        """
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                yield con
+            except BaseException:
+                con.rollback()
+                raise
+            else:
+                con.commit()
+        finally:
+            con.close()
+
+    def _execute_once_body(
+        self, con, *, operation_id: str, binding_digest: str, binding: Mapping[str, Any],
+        execute: Callable[[], Any], make_receipt: Callable[[str, Any, str | None, int], Mapping[str, Any]],
+        now: int, before_commit: Callable[[dict[str, Any]], None] | None, commit: bool,
+    ) -> tuple[str, Any, str | None, dict[str, Any], bool]:
+        """Body of :meth:`execute_once` running on an already-open connection.
+
+        ``before_commit`` is invoked AFTER dispatch produced the signed Receipt,
+        but BEFORE the local row is inserted/committed.  E1.9-C.1 uses it to
+        append Journal RESULT first, so a local-commit failure/crash leaves the
+        authoritative RESULT (with the original receipt) recoverable.  Its
+        exceptions propagate and roll back the transaction; the gate logic,
+        Receipt format and one-shot capability are completely untouched.
+        """
+        binding_json = canonical_json_bytes(dict(binding)).decode("utf-8")
+        row = con.execute("SELECT * FROM executions WHERE operation_id=?", (operation_id,)).fetchone()
+        if row is not None:
+            if row["binding_digest"] != binding_digest or row["binding_json"] != binding_json:
+                raise OperationBindingConflict("operation_id is already bound to another ToolCallBinding")
+            state = row["state"]
+            result = json.loads(row["result_json"])
+            error = row["error_text"]
+            receipt_json = row["receipt_json"]
+            if receipt_json is None:
+                # Recover records written by the earlier D10.1 implementation,
+                # which persisted the result and receipt in separate transactions.
+                completed_at = int(row["completed_at"])
+                receipt = dict(make_receipt(state, result, error, completed_at))
+                encoded_receipt = canonical_json_bytes(receipt).decode("utf-8")
+                con.execute(
+                    "UPDATE executions SET receipt_json=? WHERE operation_id=? AND receipt_json IS NULL",
+                    (encoded_receipt, operation_id),
+                )
+                receipt_json = encoded_receipt
+            if commit:
+                con.commit()
+            return state, result, error, json.loads(receipt_json), False
+
+        try:
+            result = execute()
+            result_json = canonical_json_bytes(result).decode("utf-8")
+            state, error = "SUCCEEDED", None
+        except Exception as exc:  # Persist a stable failure; never rerun the same operation.
+            result_json = canonical_json_bytes({"error": type(exc).__name__}).decode("utf-8")
+            result = json.loads(result_json)
+            state, error = "FAILED", f"{type(exc).__name__}: {exc}"
+
+        receipt = dict(make_receipt(state, result, error, now))
+        # E1.9-C.1 authoritative ordering: persist Journal RESULT (with this
+        # original signed receipt) BEFORE the local row insert/commit.
+        if before_commit is not None:
+            before_commit(receipt)
+        receipt_json = canonical_json_bytes(receipt).decode("utf-8")
+        con.execute(
+            "INSERT INTO executions(operation_id,binding_digest,binding_json,state,result_json,error_text,receipt_json,created_at,completed_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (operation_id, binding_digest, binding_json, state, result_json, error, receipt_json, now, now),
+        )
+        if commit:
+            con.commit()
+        return state, result, error, json.loads(receipt_json), True
+
     def execute_once(
         self, *, operation_id: str, binding_digest: str, binding: Mapping[str, Any],
         execute: Callable[[], Any], make_receipt: Callable[[str, Any, str | None, int], Mapping[str, Any]],
-        now: int,
+        now: int, con=None, before_commit: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[str, Any, str | None, dict[str, Any], bool]:
         """Execute once and atomically persist both result and signed receipt.
 
         The callback must be a deterministic local function without external side
         effects. Receipt construction is kept inside the same transaction so
         concurrent exact retries always observe the same durable receipt.
+
+        E1.9-C.1 additions (both optional, backwards compatible):
+          * ``con`` -- an externally managed connection from ``write_transaction``.
+            When supplied, the caller owns BEGIN/commit/rollback and this method
+            does NOT commit (A1 lock spans the whole orchestration).
+          * ``before_commit`` -- called with the freshly signed receipt before the
+            local row is inserted/committed, so Journal RESULT is authoritative
+            first.  No gate, credential or signature semantics are changed.
         """
-        binding_json = canonical_json_bytes(dict(binding)).decode("utf-8")
-        with self._db() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT * FROM executions WHERE operation_id=?", (operation_id,)).fetchone()
-            if row is not None:
-                if row["binding_digest"] != binding_digest or row["binding_json"] != binding_json:
-                    raise OperationBindingConflict("operation_id is already bound to another ToolCallBinding")
-                state = row["state"]
-                result = json.loads(row["result_json"])
-                error = row["error_text"]
-                receipt_json = row["receipt_json"]
-                if receipt_json is None:
-                    # Recover records written by the earlier D10.1 implementation,
-                    # which persisted the result and receipt in separate transactions.
-                    completed_at = int(row["completed_at"])
-                    receipt = dict(make_receipt(state, result, error, completed_at))
-                    encoded_receipt = canonical_json_bytes(receipt).decode("utf-8")
-                    con.execute(
-                        "UPDATE executions SET receipt_json=? WHERE operation_id=? AND receipt_json IS NULL",
-                        (encoded_receipt, operation_id),
-                    )
-                    receipt_json = encoded_receipt
-                con.commit()
-                return state, result, error, json.loads(receipt_json), False
-
-            try:
-                result = execute()
-                result_json = canonical_json_bytes(result).decode("utf-8")
-                state, error = "SUCCEEDED", None
-            except Exception as exc:  # Persist a stable failure; never rerun the same operation.
-                result_json = canonical_json_bytes({"error": type(exc).__name__}).decode("utf-8")
-                result = json.loads(result_json)
-                state, error = "FAILED", f"{type(exc).__name__}: {exc}"
-
-            receipt = dict(make_receipt(state, result, error, now))
-            receipt_json = canonical_json_bytes(receipt).decode("utf-8")
-            con.execute(
-                "INSERT INTO executions(operation_id,binding_digest,binding_json,state,result_json,error_text,receipt_json,created_at,completed_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
-                (operation_id, binding_digest, binding_json, state, result_json, error, receipt_json, now, now),
+        if con is not None:
+            return self._execute_once_body(
+                con, operation_id=operation_id, binding_digest=binding_digest,
+                binding=binding, execute=execute, make_receipt=make_receipt,
+                now=now, before_commit=before_commit, commit=False,
             )
-            con.commit()
-            return state, result, error, json.loads(receipt_json), True
+        with self._db() as own:
+            own.execute("BEGIN IMMEDIATE")
+            return self._execute_once_body(
+                own, operation_id=operation_id, binding_digest=binding_digest,
+                binding=binding, execute=execute, make_receipt=make_receipt,
+                now=now, before_commit=before_commit, commit=True,
+            )
 
     def get_receipt(self, operation_id: str) -> dict[str, Any] | None:
         with self._db() as con:
             row = con.execute("SELECT receipt_json FROM executions WHERE operation_id=?", (operation_id,)).fetchone()
         return None if row is None or row[0] is None else json.loads(row[0])
+
+    def restore_completed(
+        self, con, *, operation_id: str, binding_digest: str, binding: Mapping[str, Any],
+        state: str, result: Any, receipt: Mapping[str, Any], now: int,
+    ) -> None:
+        """Insert a recovered execution inside the caller's A1 transaction.
+
+        Used by E1.9-C.1 recovery: when Journal RESULT exists but the local
+        commit never landed, the ORIGINAL result + signed receipt are written
+        into the real ExecutionStore verbatim (never re-signed).  Idempotent:
+        an existing matching row is left untouched; a conflicting row fails
+        closed via OperationBindingConflict.
+        """
+        binding_json = canonical_json_bytes(dict(binding)).decode("utf-8")
+        row = con.execute("SELECT * FROM executions WHERE operation_id=?", (operation_id,)).fetchone()
+        if row is not None:
+            if row["binding_digest"] != binding_digest or row["binding_json"] != binding_json:
+                raise OperationBindingConflict("operation_id is already bound to another ToolCallBinding")
+            existing = row["receipt_json"]
+            if existing is not None:
+                encoded = canonical_json_bytes(dict(receipt)).decode("utf-8")
+                if existing != encoded:
+                    raise OperationBindingConflict("recovered receipt differs from stored receipt")
+            return
+        receipt_json = canonical_json_bytes(dict(receipt)).decode("utf-8")
+        result_json = canonical_json_bytes(result).decode("utf-8")
+        con.execute(
+            "INSERT INTO executions(operation_id,binding_digest,binding_json,state,result_json,error_text,receipt_json,created_at,completed_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (operation_id, binding_digest, binding_json, state, result_json,
+             None if state == "SUCCEEDED" else "recovered", receipt_json, now, now),
+        )
 
     def save_receipt(self, operation_id: str, binding_digest: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
         encoded = canonical_json_bytes(dict(receipt)).decode("utf-8")

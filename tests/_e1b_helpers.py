@@ -54,6 +54,37 @@ def receipt_v2(
     return receipt.as_dict()
 
 
+def make_binding_payload(
+    *, operation_id: str, executor_id: str = "exec-c", tool_name: str = "local.echo"
+) -> tuple[dict[str, Any], str]:
+    """Build a VALID 14-field ToolCallBinding.payload() and its true digest.
+
+    E1.9-C.1 C4 re-derives request identity from this payload (never from a
+    caller claim), so integration tests need a genuine binding payload rather
+    than a bare operation_id.  Returns ``(payload, binding_digest)``.
+    """
+    from online_budget.tool_binding import ToolCallBinding
+
+    binding = ToolCallBinding(
+        version=1,
+        operation_id=operation_id,
+        gateway_id="gw-1",
+        coordinator_id="coord-1",
+        global_budget_id="gb-1",
+        lease_id="lease-1",
+        global_lease_grant_digest=sha("a"),
+        execution_grant_digest=sha("b"),
+        context_digest=sha("c"),
+        tool_name=tool_name,
+        tool_schema_hash=sha("d"),
+        arguments_digest=sha("e"),
+        canonicalization_version="python-canonical-json-v1",
+        executor_id=executor_id,
+    )
+    binding.validate()
+    return binding.payload(), binding.binding_digest
+
+
 def result_envelope(
     *, operation_id: str, binding_digest: str, result: Any, receipt: Mapping[str, Any]
 ) -> dict[str, Any]:

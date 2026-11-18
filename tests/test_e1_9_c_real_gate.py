@@ -83,9 +83,10 @@ class RealFourGateIntegration(unittest.TestCase):
         from online_budget.canonical import b64encode as _b64
         # Make sure the Journal's registered key equals the executor signing key.
         # (make_config above used h.executor_key already.)
-        state = E1CLocalState(d / "e1c-local.sqlite3")
+        # A1 boundary: the orchestrator uses the REAL ExecutionStore of the
+        # executor, with the sync cursor in the same DB (no separate state DB).
         orch = JournalBackedExecutor(
-            executor=ex, client=client, state=state,
+            executor=ex, client=client, store=ex.store,
             executor_public_key=h.executor_key.public_key(),
         )
 
@@ -123,12 +124,13 @@ class RealFourGateIntegration(unittest.TestCase):
         self.assertEqual(ex.counter.dispatch_count, 1)
 
     def test_G02_real_four_gate_recovery_no_redispatch(self):
+        from online_budget.execution_store import ExecutionStore
+
         h = _SystemHarness(self, registry=_CountingRegistry())
         ex = h.executor()
         client, d = self._journal_client(h)
-        state1 = E1CLocalState(d / "e1c-local.sqlite3")
         orch = JournalBackedExecutor(
-            executor=ex, client=client, state=state1,
+            executor=ex, client=client, store=ex.store,
             executor_public_key=h.executor_key.public_key(),
         )
         pending = h.run(h.op1)
@@ -144,10 +146,13 @@ class RealFourGateIntegration(unittest.TestCase):
                 "budget_scope": h.op1.scope,
             },
         )
-        # New local state (simulate lost local commit); Journal still has RESULT.
-        state2 = E1CLocalState(d / "e1c-local2.sqlite3")
+        # Fresh empty ExecutionStore (simulate lost local commit / new instance):
+        # Journal still has RESULT, so recovery restores the ORIGINAL receipt
+        # into the new store with NO four-gate re-run and NO second dispatch.
+        db2 = d / "recovered-store.sqlite3"
+        store2 = ExecutionStore(db2)
         orch2 = JournalBackedExecutor(
-            executor=ex, client=client, state=state2,
+            executor=ex, client=client, store=store2,
             executor_public_key=h.executor_key.public_key(),
         )
         recovered = orch2.execute_with_journal(
@@ -156,6 +161,7 @@ class RealFourGateIntegration(unittest.TestCase):
         )
         self.assertEqual(recovered, first)
         self.assertEqual(ex.counter.dispatch_count, 1)  # no re-dispatch
+        self.assertEqual(store2.get_receipt(h.op1.operation_id), first)
 
 
 if __name__ == "__main__":
