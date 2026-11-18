@@ -1,0 +1,55 @@
+{
+  "G1_STATIC_ACL_SCHEMA": {
+    "benign_requests": 10,
+    "benign_accepted": 10,
+    "benign_acceptance_rate": 1.0,
+    "attack_attempts": 10,
+    "attack_accepted": 10,
+    "attack_rejection_rate": 0.0,
+    "dispatch_count": 20,
+    "unauthorized_effects": 10,
+    "unauthorized_effect_rate": 1.0
+  },
+  "G2_SIGNED_TOOL_SCOPE_V1": {
+    "benign_requests": 10,
+    "benign_accepted": 10,
+    "benign_acceptance_rate": 1.0,
+    "attack_attempts": 10,
+    "attack_accepted": 10,
+    "attack_rejection_rate": 0.0,
+    "dispatch_count": 20,
+    "unauthorized_effects": 10,
+    "unauthorized_effect_rate": 1.0
+  },
+  "G3_FULL_E1_V2": {
+    "benign_requests": 10,
+    "benign_accepted": 10,
+    "benign_acceptance_rate": 1.0,
+    "attack_attempts": 20,
+    "attack_accepted": 0,
+    "attack_rejection_rate": 1.0,
+    "dispatch_count_attack": 0,
+    "unauthorized_effects": 0,
+    "unauthorized_effect_rate": 0.0,
+    "c1": {
+      "attempts": 10,
+      "rejected": 10,
+      "d10_none": 10,
+      "d11_none": 10,
+      "dispatch_count": 0
+    },
+    "c2": {
+      "attempts": 10,
+      "rejected": 10,
+      "d10_committed": 10,
+      "d11_committed": 10,
+      "dispatch_count": 0,
+      "no_receipt": 10
+    },
+    "exact_replay": {
+      "samples": 10,
+      "identical_receipt": 10,
+      "dispatch_after_replay": 10
+    }
+  }
+}
