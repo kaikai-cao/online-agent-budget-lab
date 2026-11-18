@@ -1,0 +1,6 @@
+# Per-trial scratch state (journal DBs, local store DBs, markers, worker configs).
+# Regenerable by re-running run_experiment.py; authoritative raw records are
+# trials.csv / summary.json / raw.json in this directory.
+work/
+__pycache__/
+*.pyc

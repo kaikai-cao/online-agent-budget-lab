@@ -1,0 +1,78 @@
+{
+  "F1": {
+    "attempts": 1,
+    "valid": 1,
+    "crash_point_confirmed": 1,
+    "journal_intent_count_at_crash": 1,
+    "journal_result_count_at_crash": 0,
+    "execution_store_record_exists_at_crash": 0,
+    "external_effect_count_before_retry": 0,
+    "external_effect_count_after_retry": 1,
+    "dispatch_count_before_retry": 0,
+    "dispatch_count_after_retry": 1,
+    "retry_returned": 1,
+    "receipt_signature_valid": 1,
+    "receipt_identical_to_original_true": 0,
+    "receipt_identity_na": 1,
+    "recovery_classes": {
+      "CONTINUED_AFTER_INTENT": 1
+    }
+  },
+  "F2": {
+    "attempts": 1,
+    "valid": 1,
+    "crash_point_confirmed": 1,
+    "journal_intent_count_at_crash": 1,
+    "journal_result_count_at_crash": 0,
+    "execution_store_record_exists_at_crash": 0,
+    "external_effect_count_before_retry": 1,
+    "external_effect_count_after_retry": 2,
+    "dispatch_count_before_retry": 1,
+    "dispatch_count_after_retry": 2,
+    "retry_returned": 1,
+    "receipt_signature_valid": 1,
+    "receipt_identical_to_original_true": 0,
+    "receipt_identity_na": 1,
+    "recovery_classes": {
+      "REPEATED_EFFECT_UNCERTAIN": 1
+    }
+  },
+  "F3": {
+    "attempts": 1,
+    "valid": 1,
+    "crash_point_confirmed": 1,
+    "journal_intent_count_at_crash": 1,
+    "journal_result_count_at_crash": 1,
+    "execution_store_record_exists_at_crash": 0,
+    "external_effect_count_before_retry": 1,
+    "external_effect_count_after_retry": 1,
+    "dispatch_count_before_retry": 1,
+    "dispatch_count_after_retry": 1,
+    "retry_returned": 1,
+    "receipt_signature_valid": 1,
+    "receipt_identical_to_original_true": 1,
+    "receipt_identity_na": 0,
+    "recovery_classes": {
+      "RECOVERED_ORIGINAL_FROM_JOURNAL": 1
+    }
+  },
+  "F4": {
+    "attempts": 1,
+    "valid": 1,
+    "crash_point_confirmed": 1,
+    "journal_intent_count_at_crash": 1,
+    "journal_result_count_at_crash": 1,
+    "execution_store_record_exists_at_crash": 1,
+    "external_effect_count_before_retry": 1,
+    "external_effect_count_after_retry": 1,
+    "dispatch_count_before_retry": 1,
+    "dispatch_count_after_retry": 1,
+    "retry_returned": 1,
+    "receipt_signature_valid": 1,
+    "receipt_identical_to_original_true": 1,
+    "receipt_identity_na": 0,
+    "recovery_classes": {
+      "LOCAL_IDEMPOTENT_RETURN": 1
+    }
+  }
+}

@@ -1,0 +1,180 @@
+{
+  "meta": {
+    "experiment": "E2.2 journal crash recovery & reliability",
+    "baseline_commit": "467fa249c2c7f6971dd9f217ce0827e6f7bfc995",
+    "branch": "exp/e2.2-journal-crash-recovery",
+    "trials": 1,
+    "scenarios": [
+      "F1",
+      "F2",
+      "F3",
+      "F4"
+    ],
+    "generated_at": "2026-11-18T20:53:05+0800",
+    "duration_seconds": 8.223,
+    "effect_db_is_independent": true,
+    "journal_service_is_standalone_process": true,
+    "worker_is_standalone_process": true,
+    "kill_is_real_process_termination": true
+  },
+  "records": [
+    {
+      "scenario": "F1",
+      "trial_id": "f1-t00",
+      "operation_id": "e22-f1-t00-adfa450c",
+      "worker_pid": 20704,
+      "worker_exit_code": 1,
+      "crash_point_confirmed": true,
+      "journal_intent_count": 1,
+      "journal_result_count": 0,
+      "execution_store_record_exists": false,
+      "external_effect_count_before_retry": 0,
+      "external_effect_count_after_retry": 1,
+      "retry_returned": true,
+      "receipt_signature_valid": true,
+      "receipt_identical_to_original": "N/A_NO_ORIGINAL_AT_CRASH",
+      "dispatch_count_before_retry": 0,
+      "dispatch_count_after_retry": 1,
+      "recovery_classification": "CONTINUED_AFTER_INTENT",
+      "error_code": ""
+    },
+    {
+      "scenario": "F2",
+      "trial_id": "f2-t00",
+      "operation_id": "e22-f2-t00-368f2bf4",
+      "worker_pid": 28132,
+      "worker_exit_code": 1,
+      "crash_point_confirmed": true,
+      "journal_intent_count": 1,
+      "journal_result_count": 0,
+      "execution_store_record_exists": false,
+      "external_effect_count_before_retry": 1,
+      "external_effect_count_after_retry": 2,
+      "retry_returned": true,
+      "receipt_signature_valid": true,
+      "receipt_identical_to_original": "N/A_NO_ORIGINAL_AT_CRASH",
+      "dispatch_count_before_retry": 1,
+      "dispatch_count_after_retry": 2,
+      "recovery_classification": "REPEATED_EFFECT_UNCERTAIN",
+      "error_code": ""
+    },
+    {
+      "scenario": "F3",
+      "trial_id": "f3-t00",
+      "operation_id": "e22-f3-t00-aa1e1943",
+      "worker_pid": 22276,
+      "worker_exit_code": 1,
+      "crash_point_confirmed": true,
+      "journal_intent_count": 1,
+      "journal_result_count": 1,
+      "execution_store_record_exists": false,
+      "external_effect_count_before_retry": 1,
+      "external_effect_count_after_retry": 1,
+      "retry_returned": true,
+      "receipt_signature_valid": true,
+      "receipt_identical_to_original": true,
+      "dispatch_count_before_retry": 1,
+      "dispatch_count_after_retry": 1,
+      "recovery_classification": "RECOVERED_ORIGINAL_FROM_JOURNAL",
+      "error_code": ""
+    },
+    {
+      "scenario": "F4",
+      "trial_id": "f4-t00",
+      "operation_id": "e22-f4-t00-3441308a",
+      "worker_pid": 5456,
+      "worker_exit_code": 1,
+      "crash_point_confirmed": true,
+      "journal_intent_count": 1,
+      "journal_result_count": 1,
+      "execution_store_record_exists": true,
+      "external_effect_count_before_retry": 1,
+      "external_effect_count_after_retry": 1,
+      "retry_returned": true,
+      "receipt_signature_valid": true,
+      "receipt_identical_to_original": true,
+      "dispatch_count_before_retry": 1,
+      "dispatch_count_after_retry": 1,
+      "recovery_classification": "LOCAL_IDEMPOTENT_RETURN",
+      "error_code": ""
+    }
+  ],
+  "metrics": {
+    "F1": {
+      "attempts": 1,
+      "valid": 1,
+      "crash_point_confirmed": 1,
+      "journal_intent_count_at_crash": 1,
+      "journal_result_count_at_crash": 0,
+      "execution_store_record_exists_at_crash": 0,
+      "external_effect_count_before_retry": 0,
+      "external_effect_count_after_retry": 1,
+      "dispatch_count_before_retry": 0,
+      "dispatch_count_after_retry": 1,
+      "retry_returned": 1,
+      "receipt_signature_valid": 1,
+      "receipt_identical_to_original_true": 0,
+      "receipt_identity_na": 1,
+      "recovery_classes": {
+        "CONTINUED_AFTER_INTENT": 1
+      }
+    },
+    "F2": {
+      "attempts": 1,
+      "valid": 1,
+      "crash_point_confirmed": 1,
+      "journal_intent_count_at_crash": 1,
+      "journal_result_count_at_crash": 0,
+      "execution_store_record_exists_at_crash": 0,
+      "external_effect_count_before_retry": 1,
+      "external_effect_count_after_retry": 2,
+      "dispatch_count_before_retry": 1,
+      "dispatch_count_after_retry": 2,
+      "retry_returned": 1,
+      "receipt_signature_valid": 1,
+      "receipt_identical_to_original_true": 0,
+      "receipt_identity_na": 1,
+      "recovery_classes": {
+        "REPEATED_EFFECT_UNCERTAIN": 1
+      }
+    },
+    "F3": {
+      "attempts": 1,
+      "valid": 1,
+      "crash_point_confirmed": 1,
+      "journal_intent_count_at_crash": 1,
+      "journal_result_count_at_crash": 1,
+      "execution_store_record_exists_at_crash": 0,
+      "external_effect_count_before_retry": 1,
+      "external_effect_count_after_retry": 1,
+      "dispatch_count_before_retry": 1,
+      "dispatch_count_after_retry": 1,
+      "retry_returned": 1,
+      "receipt_signature_valid": 1,
+      "receipt_identical_to_original_true": 1,
+      "receipt_identity_na": 0,
+      "recovery_classes": {
+        "RECOVERED_ORIGINAL_FROM_JOURNAL": 1
+      }
+    },
+    "F4": {
+      "attempts": 1,
+      "valid": 1,
+      "crash_point_confirmed": 1,
+      "journal_intent_count_at_crash": 1,
+      "journal_result_count_at_crash": 1,
+      "execution_store_record_exists_at_crash": 1,
+      "external_effect_count_before_retry": 1,
+      "external_effect_count_after_retry": 1,
+      "dispatch_count_before_retry": 1,
+      "dispatch_count_after_retry": 1,
+      "retry_returned": 1,
+      "receipt_signature_valid": 1,
+      "receipt_identical_to_original_true": 1,
+      "receipt_identity_na": 0,
+      "recovery_classes": {
+        "LOCAL_IDEMPOTENT_RETURN": 1
+      }
+    }
+  }
+}

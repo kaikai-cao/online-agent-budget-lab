@@ -1,0 +1,78 @@
+{
+  "F1": {
+    "attempts": 10,
+    "valid": 10,
+    "crash_point_confirmed": 10,
+    "journal_intent_count_at_crash": 10,
+    "journal_result_count_at_crash": 0,
+    "execution_store_record_exists_at_crash": 0,
+    "external_effect_count_before_retry": 0,
+    "external_effect_count_after_retry": 10,
+    "dispatch_count_before_retry": 0,
+    "dispatch_count_after_retry": 10,
+    "retry_returned": 10,
+    "receipt_signature_valid": 10,
+    "receipt_identical_to_original_true": 0,
+    "receipt_identity_na": 10,
+    "recovery_classes": {
+      "CONTINUED_AFTER_INTENT": 10
+    }
+  },
+  "F2": {
+    "attempts": 10,
+    "valid": 10,
+    "crash_point_confirmed": 10,
+    "journal_intent_count_at_crash": 10,
+    "journal_result_count_at_crash": 0,
+    "execution_store_record_exists_at_crash": 0,
+    "external_effect_count_before_retry": 10,
+    "external_effect_count_after_retry": 20,
+    "dispatch_count_before_retry": 10,
+    "dispatch_count_after_retry": 20,
+    "retry_returned": 10,
+    "receipt_signature_valid": 10,
+    "receipt_identical_to_original_true": 0,
+    "receipt_identity_na": 10,
+    "recovery_classes": {
+      "REPEATED_EFFECT_UNCERTAIN": 10
+    }
+  },
+  "F3": {
+    "attempts": 10,
+    "valid": 10,
+    "crash_point_confirmed": 10,
+    "journal_intent_count_at_crash": 10,
+    "journal_result_count_at_crash": 10,
+    "execution_store_record_exists_at_crash": 0,
+    "external_effect_count_before_retry": 10,
+    "external_effect_count_after_retry": 10,
+    "dispatch_count_before_retry": 10,
+    "dispatch_count_after_retry": 10,
+    "retry_returned": 10,
+    "receipt_signature_valid": 10,
+    "receipt_identical_to_original_true": 10,
+    "receipt_identity_na": 0,
+    "recovery_classes": {
+      "RECOVERED_ORIGINAL_FROM_JOURNAL": 10
+    }
+  },
+  "F4": {
+    "attempts": 10,
+    "valid": 10,
+    "crash_point_confirmed": 10,
+    "journal_intent_count_at_crash": 10,
+    "journal_result_count_at_crash": 10,
+    "execution_store_record_exists_at_crash": 10,
+    "external_effect_count_before_retry": 10,
+    "external_effect_count_after_retry": 10,
+    "dispatch_count_before_retry": 10,
+    "dispatch_count_after_retry": 10,
+    "retry_returned": 10,
+    "receipt_signature_valid": 10,
+    "receipt_identical_to_original_true": 10,
+    "receipt_identity_na": 0,
+    "recovery_classes": {
+      "LOCAL_IDEMPOTENT_RETURN": 10
+    }
+  }
+}

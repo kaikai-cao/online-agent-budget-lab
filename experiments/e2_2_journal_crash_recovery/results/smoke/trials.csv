@@ -1,0 +1,5 @@
+scenario,trial_id,operation_id,worker_pid,worker_exit_code,crash_point_confirmed,journal_intent_count,journal_result_count,execution_store_record_exists,external_effect_count_before_retry,external_effect_count_after_retry,retry_returned,receipt_signature_valid,receipt_identical_to_original,dispatch_count_before_retry,dispatch_count_after_retry,recovery_classification,error_code
+F1,f1-t00,e22-f1-t00-adfa450c,20704,1,true,1,0,false,0,1,true,true,N/A_NO_ORIGINAL_AT_CRASH,0,1,CONTINUED_AFTER_INTENT,
+F2,f2-t00,e22-f2-t00-368f2bf4,28132,1,true,1,0,false,1,2,true,true,N/A_NO_ORIGINAL_AT_CRASH,1,2,REPEATED_EFFECT_UNCERTAIN,
+F3,f3-t00,e22-f3-t00-aa1e1943,22276,1,true,1,1,false,1,1,true,true,true,1,1,RECOVERED_ORIGINAL_FROM_JOURNAL,
+F4,f4-t00,e22-f4-t00-3441308a,5456,1,true,1,1,true,1,1,true,true,true,1,1,LOCAL_IDEMPOTENT_RETURN,
