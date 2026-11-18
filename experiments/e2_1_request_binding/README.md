@@ -39,6 +39,8 @@
 
 **G1/G2 是用于隔离比较授权绑定性质的实验参考实现，不是完整竞争系统。** 本实验不对四组做端到端性能优劣结论。
 
+**主对照口径**：主对照只在**相同攻击时机、相同样本数**的组之间比较——G1、G2 各 10 次参数替换样本，分别与 **G3-C2 的 10 次 Admission 后篡改样本**比较。G3-C1（Admission 前篡改，10 次）单独报告，**不并入主对照**，禁止把 C1+C2 共 20 次直接与 G1/G2 各 10 次放在同一主对照列中（两者攻击时机不同，合并会破坏可比性）。
+
 ## 5. 实验场景
 
 - **A 正常请求**：授权参数 = 执行参数 = `INV-E16-SYSTEM`，预期三组均 dispatch。
@@ -57,7 +59,7 @@
 | Dispatch Count | 每组真实进入工具 dispatch 的次数（与副作用事件分别记录） |
 | Admission 状态 | D10 Admission / D11 Transition 是否提交（C1 vs C2 必须区分） |
 
-Admission 与 Tool Dispatch **不合并**为单一指标。
+Admission 与 Tool Dispatch **不合并**为单一指标。「请求被拒绝」「未发生 dispatch」「未发生外部副作用」三者也分别记录，不混为一个指标。
 
 ## 7. 运行环境与复现命令
 
@@ -99,7 +101,8 @@ Git Bash 环境等价命令把 `PYTHONPATH` 换成 `PYTHONPATH=src:tests python 
 - 每个条件基准 `N = 10`，smoke 允许 `N = 3`。
 - 每次完整操作使用唯一 `operation_id` 与独立 harness（独立 D10 lease、D11 DB、Rust 服务进程），**不把同一 operation_id 的重复调用伪装成独立样本**。
 - G1/G2 不消耗 D10 Admission；C1 在 Admission 前失败不消耗；G3 正常/C2 每次各消耗 1 个 D10 单位。
-- 本实验是确定性机制实验，**不做统计显著性或置信区间推断**。
+- 本实验是确定性机制实验，`N = 10`，**不做统计显著性或置信区间推断**；`0/10` 不等于统计意义上的攻击成功概率为零。
+- 本实验是具体场景的受控机制实验，**不是形式化安全证明**，也**不是对所有 ACL / Capability 系统的普遍比较**。
 
 ## 9. 输出
 
@@ -115,5 +118,6 @@ Git Bash 环境等价命令把 `PYTHONPATH` 换成 `PYTHONPATH=src:tests python 
 
 - 不开展性能基准；不引入真实 LLM / AgentDojo；不做多实例唯一执行；不实现抗回滚；不改 Halo2/D11 电路；不改 Journal Service。
 - 不声称 exactly-once；不声称全面抵御 Prompt Injection；不新增生产代码功能。
-- C2 的 D10/D11 Admission 在最终门禁拒绝后**不自动回滚**，这是已记录的 Saga 窗口，不是「所有资源消耗均未发生」。
+- C2 的 D10/D11 Admission 在最终门禁拒绝后**不自动回滚、不自动退款**（实现中不存在退款机制，只有 SQLite 事务 rollback）；**Admission 成功不等于工具执行完成**。这是已记录的 Saga 窗口，不是「所有资源消耗均未发生」。
+- exact replay 只说明本次本地确定性工具测试中未增加 dispatch，**不扩展为任意外部系统的 exactly-once 保证**。
 - G1/G2 是实验参考基线，不代表真实竞争系统的完整防护能力。
