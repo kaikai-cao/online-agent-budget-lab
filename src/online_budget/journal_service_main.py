@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .journal_identity import current_process_identity
 from .journal_ipc import NamedPipeServer
+from .journal_fileacl import FileACLError, verify_private_file
 from .journal_service import JournalService, ServiceStartupError
 from .journal_service_config import ServiceConfig, ServiceConfigError
 
@@ -33,6 +34,31 @@ def _load_config(path: str) -> ServiceConfig:
     text = Path(path).read_text(encoding="utf-8")
     data = json.loads(text)
     return ServiceConfig.from_dict(data, base_dir=Path(path).resolve().parent)
+
+
+def _verify_private_file_acl(config: ServiceConfig, config_path: str) -> bool:
+    """B-F2 fail-closed startup gate on the key/config/DB file ACLs.
+
+    Returns True if the boundary was actively checked, False if it is not
+    configured (caller prints a loud warning).  A configured check that fails
+    raises FileACLError and the service refuses to start.
+    """
+    if not config.journal_service_sid:
+        return False
+    allowed = (config.journal_service_sid,)
+    forbidden_read = config.executor_account_sids
+    forbidden_write = config.executor_account_sids
+    # The config file itself carries the signing key seed (base64).
+    verify_private_file(
+        config_path, allowed_sids=allowed, forbidden_read_sids=forbidden_read
+    )
+    # Both databases: the Executor must not be able to mutate them.  On first
+    # start the file may not exist yet -- check its parent directory (the DB
+    # inherits that DACL) so the boundary is still enforced before creation.
+    for db_path in (config.journal_db_path, config.idempotency_db_path):
+        target = db_path if db_path.exists() else db_path.parent
+        verify_private_file(target, allowed_sids=allowed, forbidden_write_sids=forbidden_write)
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,6 +80,22 @@ def main(argv: list[str] | None = None) -> int:
     except (ServiceConfigError, OSError, json.JSONDecodeError) as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
+
+    # B-F2: refuse to serve if a forbidden SID can read the key/config or write
+    # a database.  Missing journal_service_sid -> loud warning, not silent OK.
+    if config.journal_service_sid:
+        try:
+            _verify_private_file_acl(config, args.config)
+        except FileACLError as exc:
+            print(f"refusing to start: private-file ACL check failed: {exc}", file=sys.stderr)
+            return 3
+    else:
+        print(
+            "WARNING: journal_service_sid not configured; private-file ACL boundary "
+            "(B-F2) is NOT enforced. Run scripts/setup_journal_service_acl.ps1 and "
+            "set journal_service_sid/executor_account_sids before production use.",
+            file=sys.stderr,
+        )
 
     try:
         service = JournalService(config, require_os_backed=True).start()

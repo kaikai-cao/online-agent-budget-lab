@@ -81,6 +81,47 @@ class IdentityCase(unittest.TestCase):
         finally:
             svc.stop()
 
+    def test_I07_production_identity_mode_is_impersonation(self):
+        """B-F4: the default (production) identity mode binds the Named Pipe
+        client SECURITY CONTEXT via impersonation, not the process token."""
+        from online_budget.journal_ipc import NamedPipeServer
+        from online_budget.journal_identity import HandleIdentityProvider, PipeClientPidIdentityProvider
+
+        svc = JournalService(self.config, require_os_backed=False).start()
+        try:
+            prod = NamedPipeServer(
+                pipe_name="i07-prod", allowed_sids=(self.config.allowed_client_sids[0],),
+                service=svc,
+            )
+            self.assertTrue(prod.is_production_identity)
+            self.assertEqual(prod.identity_mode, "impersonation")
+            self.assertIsInstance(prod._provider_for(1), HandleIdentityProvider)
+            prod.stop()
+
+            test_only = NamedPipeServer(
+                pipe_name="i07-test", allowed_sids=(self.config.allowed_client_sids[0],),
+                service=svc, identity_mode="pid_test_only",
+            )
+            self.assertFalse(test_only.is_production_identity)
+            self.assertIsInstance(test_only._provider_for(1), PipeClientPidIdentityProvider)
+            test_only.stop()
+        finally:
+            svc.stop()
+
+    def test_I08_invalid_identity_mode_rejected(self):
+        """B-F4: an unknown identity mode fails closed at construction."""
+        from online_budget.journal_ipc import NamedPipeServer
+
+        svc = JournalService(self.config, require_os_backed=False).start()
+        try:
+            with self.assertRaises(ValueError):
+                NamedPipeServer(
+                    pipe_name="i08-bad", allowed_sids=(self.config.allowed_client_sids[0],),
+                    service=svc, identity_mode="anonymous",
+                )
+        finally:
+            svc.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,10 @@ class ServiceConfig:
     allowed_client_sids: tuple[str, ...]
     os_identity_to_executor_ids: Mapping[str, frozenset[str]]
     executor_public_keys: Mapping[str, Ed25519PublicKey]
+    # B-F2 private-file isolation.  Empty means "not configured": the service
+    # prints a warning instead of silently assuming the ACL is safe.
+    journal_service_sid: str = ""
+    executor_account_sids: tuple[str, ...] = ()
 
     # -- constructors -----------------------------------------------------------
     @classmethod
@@ -65,6 +69,8 @@ class ServiceConfig:
             allowed_client_sids          list[str]  (SID strings for the pipe ACL)
             os_identity_to_executor_ids  dict[str, list[str]]
             executor_public_keys         dict[str, str(base64 pubkey)]
+            journal_service_sid          str  (optional, B-F2: service account SID owning key/DB)
+            executor_account_sids        list[str]  (optional, B-F2: SIDs denied key/DB access)
         """
         if not isinstance(data, Mapping):
             raise ServiceConfigError("config must be a mapping")
@@ -135,6 +141,18 @@ class ServiceConfig:
         if missing:
             raise ServiceConfigError(f"identity map references executor ids without a public key: {sorted(missing)}")
 
+        # B-F2 optional private-file isolation settings.  Absent fields are OK
+        # (backward compatible) but the service then warns instead of claiming
+        # the file ACL boundary is enforced.
+        svc_sid = data.get("journal_service_sid", "")
+        if not isinstance(svc_sid, str):
+            raise ServiceConfigError("journal_service_sid must be a string when present")
+        raw_exec_sids = data.get("executor_account_sids", [])
+        if not isinstance(raw_exec_sids, (list, tuple)) or not all(
+            isinstance(s, str) and s for s in raw_exec_sids
+        ):
+            raise ServiceConfigError("executor_account_sids must be a list of SID strings when present")
+
         return cls(
             pipe_name=pipe_name,
             journal_db_path=journal_path,
@@ -144,6 +162,8 @@ class ServiceConfig:
             allowed_client_sids=tuple(sids),
             os_identity_to_executor_ids=identity_map,
             executor_public_keys=pubkeys,
+            journal_service_sid=svc_sid,
+            executor_account_sids=tuple(raw_exec_sids),
         )
 
     # -- helpers ----------------------------------------------------------------
@@ -169,6 +189,8 @@ class ServiceConfig:
                 k: sorted(v) for k, v in self.os_identity_to_executor_ids.items()
             },
             "executor_public_key_fingerprints": self.public_key_digests(),
+            "journal_service_sid": self.journal_service_sid,
+            "executor_account_sids": list(self.executor_account_sids),
         }
 
 

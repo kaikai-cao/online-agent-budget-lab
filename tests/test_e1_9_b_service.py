@@ -148,6 +148,21 @@ class ServiceCase(unittest.TestCase):
             self.svc.handle(self._svc_req("drop_all", {}), self.caller)
         self.assertEqual(ctx.exception.code, "UNKNOWN_METHOD")
 
+    def test_S11_result_envelope_mismatch_rejected_no_entry(self):
+        """B-F1 service path: a valid Receipt bound to result X cannot be journalled
+        under an envelope claiming result Y; reject with no new Entry/Checkpoint.
+        """
+        self.svc.handle(self._svc_req("append_intent", self._intent_params("op-bf1")), self.caller)
+        params = self._result_params("op-bf1", result={"value": 1})
+        # Replace ONLY the envelope's result with a different value; the Receipt
+        # stays signed/self-consistent over {"value": 1}.
+        params["envelope"]["result"] = {"value": 9999}
+        with self.assertRaises(ServiceError) as ctx:
+            self.svc.handle(self._svc_req("append_result", params), self.caller)
+        self.assertEqual(ctx.exception.code, "RESULT_ENVELOPE_MISMATCH")
+        vi = self.svc.handle(self._svc_req("verify_integrity", {}), self.caller)
+        self.assertEqual(vi["verified_entries"], 1)  # only the INTENT, no RESULT
+
     # -- B.5 idempotency --------------------------------------------------------
     def test_S08_same_payload_idempotent(self):
         i1 = self.svc.handle(self._svc_req("append_intent", self._intent_params("op-idem")), self.caller)

@@ -41,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--executor-pubkey", required=True, help="base64 Ed25519 public key")
     parser.add_argument("--os-identity", required=True, help="OS account (DOMAIN\\user) allowed to use executor-id")
     parser.add_argument("--allowed-sid", action="append", default=[], help="SID allowed on the pipe ACL (repeatable)")
+    parser.add_argument("--service-sid", default="", help="B-F2: Journal service account SID owning the key/DB")
+    parser.add_argument("--executor-sid", action="append", default=[], help="B-F2: executor SID denied key/DB (repeatable)")
     args = parser.parse_args(argv)
 
     if args.journal_key:
@@ -84,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         "allowed_client_sids": list(sids),
         "os_identity_to_executor_ids": {args.os_identity: [args.executor_id]},
         "executor_public_keys": {args.executor_id: args.executor_pubkey},
+        "journal_service_sid": args.service_sid,
+        "executor_account_sids": list(args.executor_sid),
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -3,10 +3,22 @@
 Real OS primitives via ctypes (stdlib only, no pywin32):
   * server creates a Named Pipe with a security descriptor whose DACL grants
     only the configured ``allowed_client_sids`` (ACL restriction, B.2);
-  * after ConnectNamedPipe the server obtains the CLIENT's OS identity by
-    impersonation (journal_identity.identity_from_impersonated_pipe) -- the
-    identity is supplied to the service by the OS, never by the request body;
+  * PRODUCTION identity path (B-F4): after ConnectNamedPipe the server calls
+    ``ImpersonateNamedPipeClient`` + ``OpenThreadToken`` to read the CLIENT'S
+    NAMED-PIPE SECURITY CONTEXT.  This is the actual call security context, not
+    merely the client process's primary token.  The identity is supplied by the
+    OS, never by the request body.  A process may present a DIFFERENT thread
+    identity than its primary token, so the two are not interchangeable.
+  * ``identity_mode="pid_test_only"`` is a TEST-ONLY fallback that reads the
+    connected client's PROCESS primary token (GetNamedPipeClientProcessId ->
+    OpenProcessToken).  It exists solely because same-process self-connection
+    cannot impersonate (Windows error 1368, ERROR_CANT_OPEN_ANONYMOUS).  It is
+    selected explicitly by in-process tests; the standalone production process
+    always uses impersonation.  It is NOT the production security boundary.
   * no shared static Token; authentication is the OS caller identity.
+  * Cancellable accept (B-F3): the pipe is created with FILE_FLAG_OVERLAPPED and
+    ConnectNamedPipe waits on both a connection event and a stop event, so
+    ``stop()`` unblocks a server idling with no client (no terminate required).
 
 Wire protocol (framed, length-prefixed JSON):
   request  = 4-byte big-endian length + UTF-8 canonical JSON
@@ -36,7 +48,12 @@ import threading
 from typing import Any, Callable, Mapping
 
 from .canonical import canonical_json_bytes
-from .journal_identity import CallerIdentity, IdentityProvider, PipeClientPidIdentityProvider
+from .journal_identity import (
+    CallerIdentity,
+    HandleIdentityProvider,
+    IdentityProvider,
+    PipeClientPidIdentityProvider,
+)
 from .journal_service import JournalService, ServiceError, ServiceRequest
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024  # 4 MiB upper bound on a single frame
@@ -170,6 +187,33 @@ _SE_DACL_PRESENT = 0x0004
 _ERROR_NO_DATA = 232
 _ERROR_BROKEN_PIPE = 109
 _ERROR_MORE_DATA = 234
+
+# --- overlapped I/O / cancellable accept (B-F3) -------------------------------
+_FILE_FLAG_OVERLAPPED = 0x40000000
+_ERROR_IO_PENDING = 997
+_ERROR_PIPE_CONNECTED = 536
+_WAIT_OBJECT_0 = 0
+_WAIT_TIMEOUT = 258
+_WAIT_FAILED = 0xFFFFFFFF
+_REQUEST_TIMEOUT_MS = 30_000  # a connected-but-silent client cannot hang the server
+
+# --- client impersonation level (B-F4) ---------------------------------------
+# Without SECURITY_SQOS_PRESENT the pipe client token may be anonymous
+# (ImpersonateNamedPipeClient then fails with error 1368).  Ask for an explicit
+# SecurityImpersonation level so the server can read the real client context.
+_SECURITY_SQOS_PRESENT = 0x00100000
+_SECURITY_IMPERSONATION = 0x00020000
+
+
+class _OVERLAPPED(ctypes.Structure):
+    # ULONG_PTR-sized Internal/InternalHigh (pointer width on 32/64-bit).
+    _fields_ = [
+        ("Internal", ctypes.c_size_t),
+        ("InternalHigh", ctypes.c_size_t),
+        ("Offset", wintypes.DWORD),
+        ("OffsetHigh", wintypes.DWORD),
+        ("hEvent", wintypes.HANDLE),
+    ]
 
 
 class _ACE_HEADER(ctypes.Structure):
@@ -320,8 +364,128 @@ def _write_all(handle: wintypes.HANDLE, data: bytes) -> None:
         written_total += written.value
 
 
+def _create_event() -> wintypes.HANDLE:
+    kernel32 = _KERNEL32
+    kernel32.CreateEventW.argtypes = [
+        wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR
+    ]
+    kernel32.CreateEventW.restype = wintypes.HANDLE
+    # manual-reset, initially non-signalled
+    handle = kernel32.CreateEventW(None, True, False, None)
+    if not handle:
+        raise IPCError("EVENT_CREATE_FAILED", f"CreateEventW failed: {ctypes.get_last_error()}")
+    return handle
+
+
+def _wait_handle(handle: wintypes.HANDLE, timeout_ms: int) -> int:
+    kernel32 = _KERNEL32
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    return kernel32.WaitForSingleObject(handle, timeout_ms)
+
+
+def _overlapped_read(handle: wintypes.HANDLE, timeout_ms: int) -> bytes:
+    """One message-mode read on an overlapped pipe, bounded by timeout_ms."""
+    kernel32 = _KERNEL32
+    kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(_OVERLAPPED)
+    ]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.GetOverlappedResult.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(_OVERLAPPED),
+        ctypes.POINTER(wintypes.DWORD), wintypes.BOOL
+    ]
+    kernel32.GetOverlappedResult.restype = wintypes.BOOL
+    buf = ctypes.create_string_buffer(MAX_FRAME_BYTES + 4)
+    event = _create_event()
+    try:
+        ov = _OVERLAPPED()
+        ov.hEvent = event
+        read = wintypes.DWORD(0)
+        ctypes.set_last_error(0)
+        ok = kernel32.ReadFile(handle, buf, MAX_FRAME_BYTES + 4, ctypes.byref(read), ctypes.byref(ov))
+        err = ctypes.get_last_error()
+        if not ok and err != _ERROR_IO_PENDING:
+            raise IPCError("PEER_DISCONNECTED", f"overlapped ReadFile failed: {err}")
+        if not ok:  # ERROR_IO_PENDING -> wait on the event
+            waited = _wait_handle(event, timeout_ms)
+            if waited == _WAIT_TIMEOUT:
+                kernel32.CancelIoEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+                kernel32.CancelIoEx(handle, None)
+                raise IPCError("READ_TIMEOUT", "client did not send a request in time")
+            if waited == _WAIT_FAILED:
+                raise IPCError("READ_WAIT_FAILED", f"WaitForSingleObject failed: {ctypes.get_last_error()}")
+        transferred = wintypes.DWORD(0)
+        if not kernel32.GetOverlappedResult(handle, ctypes.byref(ov), ctypes.byref(transferred), True):
+            raise IPCError("PEER_DISCONNECTED", "GetOverlappedResult(read) failed")
+        if transferred.value == 0:
+            raise IPCError("PEER_DISCONNECTED", "client disconnected")
+        return buf.raw[: transferred.value]
+    finally:
+        _KERNEL32.CloseHandle(event)
+
+
+def _overlapped_write(handle: wintypes.HANDLE, data: bytes, timeout_ms: int) -> None:
+    """Write all bytes on an overlapped pipe, bounded by timeout_ms."""
+    kernel32 = _KERNEL32
+    kernel32.WriteFile.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(_OVERLAPPED)
+    ]
+    kernel32.WriteFile.restype = wintypes.BOOL
+    kernel32.GetOverlappedResult.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(_OVERLAPPED),
+        ctypes.POINTER(wintypes.DWORD), wintypes.BOOL
+    ]
+    kernel32.GetOverlappedResult.restype = wintypes.BOOL
+    event = _create_event()
+    try:
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view):
+            ov = _OVERLAPPED()
+            ov.hEvent = event
+            chunk = ctypes.create_string_buffer(bytes(view[offset:]))
+            written = wintypes.DWORD(0)
+            ctypes.set_last_error(0)
+            ok = kernel32.WriteFile(handle, chunk, len(view) - offset, ctypes.byref(written), ctypes.byref(ov))
+            err = ctypes.get_last_error()
+            if not ok and err != _ERROR_IO_PENDING:
+                raise IPCError("PEER_WRITE_FAILED", f"overlapped WriteFile failed: {err}")
+            if not ok:
+                waited = _wait_handle(event, timeout_ms)
+                if waited == _WAIT_TIMEOUT:
+                    kernel32.CancelIoEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+                    kernel32.CancelIoEx(handle, None)
+                    raise IPCError("WRITE_TIMEOUT", "client did not drain the response in time")
+            transferred = wintypes.DWORD(0)
+            if not kernel32.GetOverlappedResult(handle, ctypes.byref(ov), ctypes.byref(transferred), True):
+                raise IPCError("PEER_WRITE_FAILED", "GetOverlappedResult(write) failed")
+            if transferred.value == 0:
+                raise IPCError("PEER_WRITE_FAILED", "WriteFile transferred zero bytes")
+            offset += transferred.value
+    finally:
+        _KERNEL32.CloseHandle(event)
+
+
 class NamedPipeServer:
-    """Single-threaded Named Pipe server owning the OS-identity handshake."""
+    """Single-threaded Named Pipe server owning the OS-identity handshake.
+
+    ``identity_mode`` (B-F4):
+      * ``"impersonation"`` (PRODUCTION, default): read the connected client's
+        NAMED-PIPE SECURITY CONTEXT via ``ImpersonateNamedPipeClient`` +
+        ``OpenThreadToken``.  This is the actual acting identity and is what the
+        client explicit SQOS level (``SecurityImpersonation``) enables.
+      * ``"pid_test_only"`` (TEST ONLY): read the client PROCESS primary token.
+        A thread may act under a different identity than its process token, so
+        this is NOT equivalent and is not the production boundary.  It exists
+        only for same-process tests where impersonation is impossible (error
+        1368).  Constructing it in production is a deployment error; the
+        standalone process entry point never selects it.
+    """
+
+    _IDENTITY_MODES = ("impersonation", "pid_test_only")
 
     def __init__(
         self,
@@ -330,12 +494,21 @@ class NamedPipeServer:
         allowed_sids: tuple[str, ...],
         service: JournalService,
         require_os_backed: bool = True,
+        identity_mode: str = "impersonation",
     ) -> None:
+        if identity_mode not in self._IDENTITY_MODES:
+            raise ValueError(f"identity_mode must be one of {self._IDENTITY_MODES}")
         self.pipe_name = pipe_name
         self.allowed_sids = allowed_sids
         self.service = service
         self.require_os_backed = require_os_backed
+        self.identity_mode = identity_mode
         self._stop = threading.Event()
+        self._stop_event = _create_event()  # async accept waits on this too
+
+    @property
+    def is_production_identity(self) -> bool:
+        return self.identity_mode == "impersonation"
 
     @property
     def path(self) -> str:
@@ -343,6 +516,17 @@ class NamedPipeServer:
 
     def stop(self) -> None:
         self._stop.set()
+        # Release any accept() blocked in WaitForMultipleObjects so the server
+        # can exit cleanly with NO client connected (B-F3).
+        kernel32 = _KERNEL32
+        kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+        kernel32.SetEvent.restype = wintypes.BOOL
+        kernel32.SetEvent(self._stop_event)
+
+    def _provider_for(self, handle: wintypes.HANDLE) -> IdentityProvider:
+        if self.identity_mode == "impersonation":
+            return HandleIdentityProvider(handle)
+        return PipeClientPidIdentityProvider(handle)
 
     def serve_one(self, timeout_ms: int = 1000) -> bool:
         """Accept at most one client, handle one request, reply, disconnect.
@@ -359,9 +543,10 @@ class NamedPipeServer:
         ]
         kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
         ctypes.set_last_error(0)
+        # FILE_FLAG_OVERLAPPED makes ConnectNamedPipe cancellable (B-F3).
         handle = kernel32.CreateNamedPipeW(
             self.path,
-            _PIPE_ACCESS_DUPLEX,
+            _PIPE_ACCESS_DUPLEX | _FILE_FLAG_OVERLAPPED,
             _PIPE_TYPE_MESSAGE | _PIPE_READMODE_MESSAGE | _PIPE_WAIT,
             _PIPE_UNLIMITED_INSTANCES,
             MAX_FRAME_BYTES,
@@ -372,36 +557,69 @@ class NamedPipeServer:
         create_err = ctypes.get_last_error()
         if handle in (None, wintypes.HANDLE(-1).value, 0):
             raise IPCError("PIPE_CREATE_FAILED", f"CreateNamedPipeW failed: {create_err}")
+        connect_event = _create_event()
         try:
-            kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+            # Async connect, then wait on EITHER a client connection OR stop().
+            kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.POINTER(_OVERLAPPED)]
             kernel32.ConnectNamedPipe.restype = wintypes.BOOL
-            connected = kernel32.ConnectNamedPipe(handle, None)
-            if not connected and ctypes.get_last_error() not in (0, 536):  # 536 = ERROR_PIPE_CONNECTED
-                raise IPCError("PIPE_CONNECT_FAILED", f"ConnectNamedPipe failed: {ctypes.get_last_error()}")
+            ov = _OVERLAPPED()
+            ov.hEvent = connect_event
+            ctypes.set_last_error(0)
+            started = kernel32.ConnectNamedPipe(handle, ctypes.byref(ov))
+            connect_err = ctypes.get_last_error()
+            if not started and connect_err == _ERROR_IO_PENDING:
+                kernel32.WaitForMultipleObjects.argtypes = [
+                    wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.BOOL, wintypes.DWORD
+                ]
+                kernel32.WaitForMultipleObjects.restype = wintypes.DWORD
+                handles = (wintypes.HANDLE * 2)(connect_event, self._stop_event)
+                waited = kernel32.WaitForMultipleObjects(2, handles, False, int(timeout_ms))
+                if waited == _WAIT_OBJECT_0 + 1 or waited == _WAIT_TIMEOUT or waited == _WAIT_FAILED:
+                    # stop() signalled, deadline expired, or wait error: cancel the
+                    # pending accept and return WITHOUT serving a client.
+                    kernel32.CancelIoEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+                    kernel32.CancelIoEx(handle, ctypes.byref(ov))
+                    return False
+                # _WAIT_OBJECT_0 -> a client connected; finish the connect.
+                kernel32.GetOverlappedResult.argtypes = [
+                    wintypes.HANDLE, ctypes.POINTER(_OVERLAPPED),
+                    ctypes.POINTER(wintypes.DWORD), wintypes.BOOL
+                ]
+                kernel32.GetOverlappedResult.restype = wintypes.BOOL
+                transferred = wintypes.DWORD(0)
+                if not kernel32.GetOverlappedResult(handle, ctypes.byref(ov), ctypes.byref(transferred), True):
+                    return False
+            elif not started and connect_err not in (0, _ERROR_PIPE_CONNECTED):
+                raise IPCError("PIPE_CONNECT_FAILED", f"ConnectNamedPipe failed: {connect_err}")
+
             # OS-supplied caller identity (never from the request body).  The
-            # server asks the OS for the connected client's process token -> SID.
-            provider: IdentityProvider = PipeClientPidIdentityProvider(handle)
+            # production path reads the Named Pipe client security context;
+            # the test-only path reads the client process primary token.
+            provider: IdentityProvider = self._provider_for(handle)
             caller = provider.authenticate()
             # Validate the OS identity is in the fixed mapping before doing any work.
             self.service._authorizer.authorize_read(caller)
-            raw = _read_message(handle)  # one WriteFile message == one request frame
+            raw = _overlapped_read(handle, _REQUEST_TIMEOUT_MS)  # one message == one frame
             response_bytes = dispatch(self.service, caller, raw)
-            _write_all(handle, response_bytes)
+            _overlapped_write(handle, response_bytes, _REQUEST_TIMEOUT_MS)
             return True
         except IPCError:
             raise
         except Exception as exc:  # noqa: BLE001
             raise IPCError("PIPE_SERVER_ERROR", f"{type(exc).__name__}: {exc}") from exc
         finally:
+            _KERNEL32.CloseHandle(connect_event)
             kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
             kernel32.DisconnectNamedPipe(handle)
             kernel32.CloseHandle(handle)
 
-    def serve_forever(self) -> None:
-        import time
+    def serve_forever(self, timeout_ms: int = 1000) -> None:
+        """Serve until stop().  Each accept is cancellable via the stop event,
+        so idling with no client does NOT prevent a clean shutdown (B-F3).
+        """
         while not self._stop.is_set():
             try:
-                self.serve_one()
+                self.serve_one(timeout_ms=timeout_ms)
             except IPCError:
                 # A bad/unauthorised client must not kill the service.  A brief
                 # backoff avoids a busy loop while the pipe is rebuilt.
@@ -431,7 +649,9 @@ class NamedPipeClient:
             handle = kernel32.CreateFileW(
                 self.path, _GENERIC_READ | _GENERIC_WRITE, 0, None,
                 3,  # OPEN_EXISTING
-                0,
+                # Request SecurityImpersonation so the server's
+                # ImpersonateNamedPipeClient gets a usable client token (B-F4).
+                _SECURITY_SQOS_PRESENT | _SECURITY_IMPERSONATION,
                 None,
             )
             last = ctypes.get_last_error()

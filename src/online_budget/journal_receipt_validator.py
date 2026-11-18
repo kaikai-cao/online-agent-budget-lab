@@ -18,7 +18,12 @@ Checks (all must pass; any failure rejects the append, no Entry/Checkpoint):
   6. ``binding_digest`` binding: Receipt.binding_digest == RESULT
      envelope.binding_digest == INTENT.binding_digest;
   7. ``result_digest`` recomputed with the frozen rule
-     ``digest({"domain":"agent-tool-result-v1","result": result})``.
+     ``digest({"domain":"agent-tool-result-v1","result": result})`` from BOTH the
+     Receipt's own ``result`` AND the RESULT envelope's ``result`` (B-F1);
+  8. Receipt ``result`` == RESULT envelope ``result`` (B-F1).  Without this, a
+     Receipt signed for result X could be paired with an envelope carrying
+     result Y while both the signature and the Receipt-internal digest stay
+     valid -- the Journal would then record a result the Executor never signed.
 
 Honest boundary (E1.9-B2 §5.4.1): the Receipt is self-signed by the Executor.
 A successful verification proves ONLY that the Receipt came from the registered
@@ -99,6 +104,27 @@ def validate_result_receipt(
         raise ReceiptValidationError("ENVELOPE_FIELDS", "RESULT envelope must be exactly four fields")
     if not is_sha256(envelope.get("binding_digest")):
         raise ReceiptValidationError("BINDING_DIGEST_FORMAT", "RESULT envelope binding_digest is not sha256")
+
+    # (8, B-F1) Receipt result == RESULT envelope result.  This is the binding
+    # that was missing: without it a Receipt signed over result X could be
+    # attached to an envelope carrying result Y, with the Receipt signature and
+    # its own result_digest both still valid.  Check BEFORE recomputing the
+    # envelope-side digest so the error is attributable to the mismatch.
+    envelope_result = envelope.get("result")
+    if payload.get("result") != envelope_result:
+        raise ReceiptValidationError(
+            "RESULT_ENVELOPE_MISMATCH", "Receipt result != RESULT envelope result"
+        )
+
+    # (7, B-F1) result_digest must match the digest of the ENVELOPE's result too.
+    # With check (8) this is implied, but we recompute explicitly so that the
+    # digest commitment is proven against the value actually being journaled.
+    expected_envelope_digest = digest({"domain": "agent-tool-result-v1", "result": envelope_result})
+    if payload.get("result_digest") != expected_envelope_digest:
+        raise ReceiptValidationError(
+            "ENVELOPE_RESULT_DIGEST_MISMATCH",
+            "Receipt result_digest does not match digest of RESULT envelope result",
+        )
 
     # (4) executor_id == INTENT executor_id
     if payload.get("executor_id") != intent_executor_id:

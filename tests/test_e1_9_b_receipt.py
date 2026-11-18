@@ -123,6 +123,34 @@ class ReceiptCase(unittest.TestCase):
             self._validate(receipt=r, envelope=self._envelope(receipt=r))
         self.assertIn(ctx.exception.code, {"RECEIPT_SIGNATURE", "RESULT_DIGEST_MISMATCH"})
 
+    def test_V11_receipt_result_vs_envelope_result_binding(self):
+        """B-F1: a valid Receipt over result X must not pair with an envelope carrying result Y.
+
+        The Receipt itself is fully valid: correct v2 fields, self-consistent
+        result_digest, and a correct signature by the registry key.  Only the
+        envelope's ``result`` differs.  Before B-F1 this combination was
+        accepted, letting the Journal record a result the Executor never signed.
+        """
+        receipt = self._receipt(result=self.result)  # signed over {"value": 42}
+        rogue_envelope = result_envelope(
+            operation_id=self.op,
+            binding_digest=self.binding,
+            result={"value": 9999},  # envelope claims a DIFFERENT result
+            receipt=receipt,
+        )
+        with self.assertRaises(ReceiptValidationError) as ctx:
+            self._validate(receipt=receipt, envelope=rogue_envelope)
+        self.assertEqual(ctx.exception.code, "RESULT_ENVELOPE_MISMATCH")
+
+    def test_V12_matching_receipt_and_envelope_result_passes(self):
+        """B-F1 control: identical (non-trivial) results on both sides still pass."""
+        rich = {"value": 42, " echoed": ["a", "b"], "nested": {"k": 1}}
+        receipt = self._receipt(result=rich)
+        envelope = result_envelope(
+            operation_id=self.op, binding_digest=self.binding, result=rich, receipt=receipt
+        )
+        self._validate(receipt=receipt, envelope=envelope)
+
 
 if __name__ == "__main__":
     unittest.main()
