@@ -333,10 +333,9 @@ D_prop = t_snapshot_obtained - t_revoke     （注入逻辑时钟，单位 s；�
 | 注入逻辑时钟（s） | `t_issue / t_revoke / t_exec_attempt / t_snapshot_generated / t_snapshot_obtained / t_first_reject / t_last_refresh_local / t_query / t_consume` 及快照 `generated_at / valid_from / valid_until` | 所有窗口与延迟指标（`W_risk` / `D_prop` / `age`） |
 | 墙钟 `perf_counter`（ms） | `sync_duration_ms / snapshot_verify_ms / refresh_latency_ms` | 仅成本类指标（协议 §6.4） |
 
-**理论上界（带明确前提，只作趋势分析，不参与实验复算与判定）**：按撤销后首次执行所走的 §5.3 路径分两种——
+**定性趋势与上界（均不参与实验复算与判定）**：按撤销后首次执行所走的 §5.3 路径分两种——路径 A 只给定性趋势、**不提供任何上界表达式**；路径 B 给出同属注入逻辑时钟的上界。
 
-- **路径 A：执行时在线且刷新成功**（`REFRESH_SUCCESS`）。执行前刷新拉到含撤销的新快照 → 立即 `REVOKED_BY_SNAPSHOT`。若撤销后仍有执行请求且请求间隔 ≤ `R`，可符号化为
-  `W_risk ≲ R + T_refresh_wall + T_gap`，其中 `R = refresh_interval_s`（协议 §2 冻结配置，逻辑秒）、`T_refresh_wall = refresh_latency_ms`（协议 §5.3，墙钟实测秒）、`T_gap = t_exec_attempt - t_revoke`（协议 §5.2，注入逻辑秒）。**三项各有可复算字段，但分属两个时间体系；其代数和只表达"存在后续请求时窗口随 `R` 缩小"的趋势，不作为 `W_risk` 报告值或判定值**——报告与判定一律用上面的实测式。
+- **路径 A：执行时在线且刷新成功**（`REFRESH_SUCCESS`）。执行前刷新拉到含撤销的新快照 → 立即 `REVOKED_BY_SNAPSHOT`。此处只给定性趋势：**存在后续执行请求时，撤销风险窗口预期随刷新间隔 `R` 缩小**。本文**不为路径 A 提供任何上界表达式**：`R` 与 `t_exec_attempt - t_revoke` 属注入逻辑时钟，刷新耗时 `refresh_latency_ms` 属墙钟，**两个时间体系的量不可相加，即使只表达趋势也不构成可称述的上界**；路径 A 的具体 `W_risk` 只能通过 `t_first_reject - t_revoke` 实测获得。
 - **路径 B：执行时离线 / 刷新失败但旧快照未过期**（`REFRESH_FAILED_STALE_CONTINUE` 或全程无刷新）。旧快照不含该撤销且未命中 → 放行，直到①快照过期 `now >= valid_until` fail closed，或②恢复在线并刷新成功。可符号化为
   `W_risk ≲ min(snapshot_valid_until, t_snapshot_obtained) - t_revoke`（`t_snapshot_obtained = NULL` 表示未取得），其中 `snapshot_valid_until = t_snapshot_generated + S`（协议 §2/§5，注入逻辑时钟）。主要由 `S` 与撤销时刻决定，最坏趋近 `S`；`R` 不约束此路径。该式各量同属注入逻辑时钟、可复算，但仍只作趋势分析，判定用实测式。
 - **无后续请求**：`t_first_reject` 不存在，`W_risk` 记为 `>` 观测窗上界。

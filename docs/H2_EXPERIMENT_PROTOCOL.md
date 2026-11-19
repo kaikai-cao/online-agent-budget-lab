@@ -115,7 +115,7 @@
 
 > M14 是判定 H2-main 的关键场景，须同时覆盖两种连通性（`W_risk` 按设计 §7.1 分路径推导，不得用单一 `R` 代替）：
 > - **纯离线 / 刷新失败但缓存未过期（路径 B）**：C1 `τ=A=60s` 给 `W_risk ≤ 60s`；C2 设 `S=120s ≥ A`，走 `REFRESH_FAILED_STALE_CONTINUE` 直到过期 fail closed，`W_risk ≤ S - (t_revoke - t_snapshot_generated)`（最坏趋近 `S=120s`）。此臂 C2 **可能输**。
-> - **间歇可达且刷新成功（路径 A）**：C1 仍 `W_risk ≤ τ`；C2 在 `age>=R` 的执行前刷新中拉到含撤销快照。实测 `W_risk = t_first_reject - t_revoke`（§6.2）；设计 §7.1 的 `R + T_refresh_wall + T_gap` 只是带前提的**理论上界、不参与判定**。此臂 C2 **可能赢**，但必须用实测 `actual_refresh_request_rate`（而非 `1/R`）证明在线成本低于 B2（§6.4）。
+> - **间歇可达且刷新成功（路径 A）**：C1 仍 `W_risk ≤ τ`；C2 在 `age>=R` 的执行前刷新中拉到含撤销快照。路径 A 预期风险窗口随 `R` 缩小，但**不提供任何上界表达式**；具体 `W_risk = t_first_reject - t_revoke` 一律实测（§6.2）。此臂 C2 **可能赢**，但必须用实测 `actual_refresh_request_rate`（而非 `1/R`）证明在线成本低于 B2（§6.4）。
 > - 报告须按 `REFRESH_SUCCESS` / `REFRESH_FAILED_STALE_CONTINUE` 分别统计 `W_risk` 的 median/min/max；合并统计会掩盖两条路径的相反结论。
 
 ---
@@ -196,7 +196,7 @@ D_prop(t) = (t.t_snapshot_obtained - t.t_revoke) * 1000 ms （C2，仅当取得�
   - `ONLINE_REFRESH_OK`（路径 A，对应 `refresh_outcome=REFRESH_SUCCESS`）；
   - `OFFLINE_STALE_CONTINUE`（路径 B，对应 `REFRESH_FAILED_STALE_CONTINUE` 或全程无刷新）；
   - 分别给 median / min / max；**禁止**跨路径合并成一个"C2 风险窗口"，也**禁止**用 `R` 直接作为 C2 的风险窗口。
-- **理论上界不参与复算 / 判定**：设计 §7.1 的路径 A 式 `R + T_refresh_wall + T_gap` 与路径 B 式 `min(snapshot_valid_until, t_snapshot_obtained) - t_revoke` 是带前提的趋势分析；其中 `T_refresh_wall = refresh_latency_ms` 为墙钟量，**不得与逻辑时间量相加得到报告用的 `W_risk`**。判定与结论只用上面的实测式。
+- **上界口径（不参与复算 / 判定）**：设计 §7.1 仅为路径 B 保留一个**同属注入逻辑时钟**的上界 `min(snapshot_valid_until, t_snapshot_obtained) - t_revoke`（纯逻辑量、可复算，但只作趋势分析）；**路径 A 不提供任何上界表达式**——在线刷新成功时风险窗口预期随 `R` 缩小，具体数值只能由 `t_first_reject - t_revoke` 实测。墙钟 `refresh_latency_ms` 只用于成本，**不得与逻辑时间量相加得到报告用的 `W_risk`**，也不得据任何表达式反推报告值。判定与结论只用上面的实测式。
 - 单元聚合报告中同时给 `W_risk` 与 `D_prop` 的 median / min / max；**禁止**用其中一个代替另一个。
 - 正确性约束：`false_allow`（定义见 6.3）必须单独统计，不能隐藏在延迟值里。
 
