@@ -1,0 +1,264 @@
+{
+  "expected_conformance": {
+    "T1": {
+      "P0": {
+        "conform": 10,
+        "expected": [
+          "COVERED"
+        ],
+        "total": 10
+      },
+      "P1": {
+        "conform": 10,
+        "expected": [
+          "COVERED"
+        ],
+        "total": 10
+      },
+      "P2": {
+        "conform": 10,
+        "expected": [
+          "COVERED"
+        ],
+        "total": 10
+      },
+      "P3": {
+        "conform": 10,
+        "expected": [
+          "COVERED"
+        ],
+        "total": 10
+      }
+    },
+    "T2": {
+      "P0": {
+        "conform": 10,
+        "expected": [
+          "COVERED"
+        ],
+        "total": 10
+      },
+      "P1": {
+        "conform": 10,
+        "expected": [],
+        "total": 10
+      },
+      "P2": {
+        "conform": 10,
+        "expected": [
+          "BYPASS_DETECTED"
+        ],
+        "total": 10
+      },
+      "P3": {
+        "conform": 10,
+        "expected": [
+          "BYPASS_DETECTED"
+        ],
+        "total": 10
+      }
+    },
+    "T3": {
+      "P0": {
+        "conform": 10,
+        "expected": [],
+        "total": 10
+      },
+      "P1": {
+        "conform": 10,
+        "expected": [
+          "MISSING_EVIDENCE"
+        ],
+        "total": 10
+      },
+      "P2": {
+        "conform": 10,
+        "expected": [
+          "MISSING_EVIDENCE"
+        ],
+        "total": 10
+      },
+      "P3": {
+        "conform": 10,
+        "expected": [
+          "MISSING_EVIDENCE"
+        ],
+        "total": 10
+      }
+    },
+    "T4": {
+      "P0": {
+        "conform": 10,
+        "expected": [
+          "DUPLICATE_IGNORED"
+        ],
+        "total": 10
+      },
+      "P1": {
+        "conform": 10,
+        "expected": [
+          "COVERED",
+          "DUPLICATE_IGNORED"
+        ],
+        "total": 10
+      },
+      "P2": {
+        "conform": 10,
+        "expected": [
+          "COVERED",
+          "DUPLICATE_IGNORED"
+        ],
+        "total": 10
+      },
+      "P3": {
+        "conform": 10,
+        "expected": [
+          "COVERED",
+          "DUPLICATE_IGNORED"
+        ],
+        "total": 10
+      }
+    },
+    "T5": {
+      "P0": {
+        "conform": 10,
+        "expected": [
+          "COVERED"
+        ],
+        "total": 10
+      },
+      "P1": {
+        "conform": 10,
+        "expected": [
+          "COVERED"
+        ],
+        "total": 10
+      },
+      "P2": {
+        "conform": 10,
+        "expected": [
+          "UNCERTAIN"
+        ],
+        "total": 10
+      },
+      "P3": {
+        "conform": 10,
+        "expected": [
+          "UNCERTAIN"
+        ],
+        "total": 10
+      }
+    }
+  },
+  "experiment": "r2_4_phase2_gateway_coverage",
+  "four_metrics": {
+    "P0": {
+      "duplicate_metering_error": {
+        "errors": 10,
+        "trials": 10
+      },
+      "execution_coverage": {
+        "covered": 40,
+        "executed": 50,
+        "rate": 0.8
+      },
+      "missing_report_detection": {
+        "detected": 0,
+        "rate": 0.0,
+        "suppressed": 10
+      },
+      "uncertain_state_correctness": {
+        "correct": 0,
+        "rate": 0.0,
+        "trials": 10
+      }
+    },
+    "P1": {
+      "duplicate_metering_error": {
+        "errors": 0,
+        "trials": 10
+      },
+      "execution_coverage": {
+        "covered": 40,
+        "executed": 40,
+        "rate": 1.0
+      },
+      "missing_report_detection": {
+        "detected": 10,
+        "rate": 1.0,
+        "suppressed": 10
+      },
+      "uncertain_state_correctness": {
+        "correct": 0,
+        "rate": 0.0,
+        "trials": 10
+      }
+    },
+    "P2": {
+      "duplicate_metering_error": {
+        "errors": 0,
+        "trials": 10
+      },
+      "execution_coverage": {
+        "covered": 40,
+        "executed": 40,
+        "rate": 1.0
+      },
+      "missing_report_detection": {
+        "detected": 10,
+        "rate": 1.0,
+        "suppressed": 10
+      },
+      "uncertain_state_correctness": {
+        "correct": 10,
+        "rate": 1.0,
+        "trials": 10
+      }
+    },
+    "P3": {
+      "duplicate_metering_error": {
+        "errors": 0,
+        "trials": 10
+      },
+      "execution_coverage": {
+        "covered": 40,
+        "executed": 40,
+        "rate": 1.0
+      },
+      "missing_report_detection": {
+        "detected": 10,
+        "rate": 1.0,
+        "suppressed": 10
+      },
+      "uncertain_state_correctness": {
+        "correct": 10,
+        "rate": 1.0,
+        "trials": 10
+      }
+    }
+  },
+  "generated_utc": "2026-11-19T12:27:59.985019+00:00",
+  "gt_isolation": {
+    "enforced_by": [
+      "verifier.py accepts ObservableEvidence only",
+      "assert_no_ground_truth in tests"
+    ],
+    "ground_truth_in_verifier_input": false
+  },
+  "scenarios": [
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5"
+  ],
+  "schemes": [
+    "P0",
+    "P1",
+    "P2",
+    "P3"
+  ],
+  "seed_base": 20261120,
+  "total_records": 50,
+  "trials_per_scenario": 10
+}

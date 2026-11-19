@@ -1,0 +1,51 @@
+{
+  "experiment": "r2_4_phase2_gateway_coverage",
+  "seed_base": 20261120,
+  "trials_per_scenario": 10,
+  "scenarios": ["T1", "T2", "T3", "T4", "T5"],
+  "schemes": ["P0", "P1", "P2", "P3"],
+  "scheme_composition": {
+    "P0": "service self-report (service-signed submissions only)",
+    "P1": "P0 + mandatory enforcement gateway (entrance authenticates gateway-signed receipts)",
+    "P2": "P1 + independent ingress observer (own DB + own key)",
+    "P3": "P2 + witness-registered expected calls"
+  },
+  "scope": {
+    "in_scope": [
+      "agent tool-call counts",
+      "service ingress receipt",
+      "call linkage to authorization intent and attempt",
+      "uncertain-state detection when observation evidence is lost"
+    ],
+    "out_of_scope": [
+      "token/CPU/GPU resource metering",
+      "complex cross-domain delegation chains",
+      "real TEE / remote attestation",
+      "Halo2 / zero-knowledge circuits",
+      "pricing / billing / payment settlement"
+    ]
+  },
+  "metrics": {
+    "execution_coverage": "of ground-truth EXECUTED logical calls, fraction that have an observable evidence anchor (any non-NO_EVIDENCE verdict) under the scheme; joined by logical_call_id so P0's missing attempt tracking is not conflated with coverage; rejected bypass requests are excluded from the denominator",
+    "missing_report_detection": "of deliberately suppressed reports (T3), fraction the scheme flags as MISSING_EVIDENCE",
+    "duplicate_metering_error": "count of calls where same execution is billed more than once OR distinct attempts merged into one bill",
+    "uncertain_state_correctness": "of T5 trials (observation lost), fraction the scheme returns UNCERTAIN instead of COVERED"
+  },
+  "expected_matrix": {
+    "T1": {"P0": ["COVERED"], "P1": ["COVERED"], "P2": ["COVERED"], "P3": ["COVERED"]},
+    "T2": {"P0": ["COVERED"], "P1": [], "P2": ["BYPASS_DETECTED"], "P3": ["BYPASS_DETECTED"]},
+    "T3": {"P0": [], "P1": ["MISSING_EVIDENCE"], "P2": ["MISSING_EVIDENCE"], "P3": ["MISSING_EVIDENCE"]},
+    "T4": {
+      "P0": ["DUPLICATE_IGNORED"],
+      "P1": ["COVERED", "DUPLICATE_IGNORED"],
+      "P2": ["COVERED", "DUPLICATE_IGNORED"],
+      "P3": ["COVERED", "DUPLICATE_IGNORED"]
+    },
+    "T5": {"P0": ["COVERED"], "P1": ["COVERED"], "P2": ["UNCERTAIN"], "P3": ["UNCERTAIN"]}
+  },
+  "prior_art_baseline": [
+    "IETF IoA Usage Accounting draft: tool-call events, coverage boundary, expected-event sets, record retransmission vs execution attempt — not re-packaged as novelty",
+    "OWASP MCP secure-development guide: tool-call identity, request ID, parameter metadata, approval, policy decision, audit log — adding a plain MCP call log is not a sufficient contribution"
+  ],
+  "note": "The expected matrix is a pre-registered hypothesis, NOT an obtained result. 50 trials validate reproducibility and scenario conformance, not statistical security."
+}
