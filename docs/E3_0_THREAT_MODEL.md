@@ -69,7 +69,7 @@ LLM / Planner  →  工具调用请求 (tool_name, arguments)
   - (b) **不可信的工具路由 / 网关组件**：多 Agent 委派或代理链中，中间执行方改写下游调用参数；
   - (c) **被篡改的本地执行链**：stdio 传输下 host 与 server 之间的本地进程被控制。
   - **定位** `[ASSUMPTION]`：以上能力在真实 Agent 中的普遍性**尚无一手实证**，属实验构造能力；若只能人为构造，研究价值降为「机制验证」而非「真实威胁防护」。
-  - **为什么现有机制不能解决** `[FACT/INFER]`：TLS 只保护传输、不保护 TLS 终止后的端内数据；Host 的 HITL 确认在 2026-07-28 tools 页是 SHOULD 级建议且确认的是「工具名/意义」而非生效参数，审批后参数变更在 OWASP Cheat Sheet 中要求重新批准但多数实现未强制；MCP Server 输入校验只做 schema/类型校验、不校验语义合法性。OWASP MCP 安全指南专门讨论 TLS 终止后的消息完整性，并指出 MCP 核心传输规范不要求每条 JSON-RPC 消息都签名。[^M1][^W1]
+  - **为什么不能假定现有机制一定解决** `[FACT/INFER]`（区分规范要求、行业建议、真实实现三层，不从规范等级推断产品行为）：①**TLS** 只保护传输、不保护 TLS 终止后的端内数据（此层为 `[FACT]`）；②**MCP 规范**建议人工参与（2026-07-28 tools 页 human-in-the-loop 为 SHOULD），但**未统一规定所有 Host 的确认界面必须展示并绑定完整规范化参数**——这是规范覆盖面的事实，不代表任何具体 Host 的实现缺陷；③**OWASP 已明确提出**参数级审批与参数变化后重新批准原则（AI Agent Security / Transaction Authorization Cheat Sheet）[^W1][^W2]；④**具体 Host 是否落实、确认界面是否覆盖实际生效参数，须针对选定实现单独核实**，不能从规范 SHOULD 等级直接推断其未落实；⑤**MCP Server 输入校验**做 schema/类型校验而非语义合法性校验。OWASP MCP 安全指南讨论 TLS 终止后的消息完整性，并指出 MCP 核心传输规范不要求每条 JSON-RPC 消息都签名。[^M1][^W1]
   - **独立性要求** `[ASSUMPTION]`：授权签名方（可信授权服务/用户界面）与执行验证方（Gateway/Executor）必须在不同信任域；若同一主体既签又验，C2 能同时改写两者，机制失效。
 - **C3 越权调用者** `[FACT]`：利用过宽 scope / confused deputy 调用本不应调用的工具或参数。证据：MCP02 scope creep、CVE-2025-49596。
 - **C4 重放/重试者** `[FACT]`：能触发同一 `tools/call` 的重复执行（网络超时重试、at-least-once runtime）。证据：工程实践中 at-least-once 重试导致重复副作用；MCP 规范无幂等强制机制 `[ASSUMPTION]`。
@@ -134,4 +134,5 @@ agent 自身日志被篡改或缺失 → 无法追责。`[FACT]` OWASP MCP08（b
 
 [^M1]: MCP Specification 2026-07-28, "Tools" / "Security Best Practices" — modelcontextprotocol.io/specification/2026-07-28/server/tools（human-in-the-loop 为 SHOULD；annotations MUST 不可信；"MCP itself cannot enforce these security principles at the protocol level"）
 [^W1]: OWASP Cheat Sheet Series, "AI Agent Security Cheat Sheet" — cheatsheetseries.owasp.org/cheatsheets/AI_Agent_Security_Cheat_Sheet.html（§1 Tool Authorization Middleware：user_confirmed 不足、target/参数变更需重新批准、执行前原子消费）
+[^W2]: OWASP Cheat Sheet Series, "Transaction Authorization Cheat Sheet" — cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html（§1.5：共享状态下执行前原子 check-and-consume；每操作唯一凭证）
 [^W4]: R. Sharif, "MCPS: Cryptographic Security Layer for the Model Context Protocol", `draft-sharif-mcps-secure-mcp-01`, 2026-08-21 — datatracker.ietf.org/doc/draft-sharif-mcps-secure-mcp/（个人 Internet-Draft，非已采纳标准；§1.2、§11.2 逐字核实）

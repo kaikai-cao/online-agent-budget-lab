@@ -86,7 +86,7 @@ SQL 由模型生成，非纯模板。P2SQL 论文 §3.2.1 证实 LLM 可被诱�
 
 授权主要下移到数据库层：P2SQL 防御方案建独立 `MODE_CHATBOT` 角色仅授 SELECT；Genie 用双凭证——计算凭证由作者嵌入、数据访问按终端用户自身 Unity Catalog 身份评估，「row filters and column masks are automatically enforced per user」；Vanna 2.0 有 RBAC（per-tool `access_groups`）、per-user quota、会话隔离；MCP Authorization（OAuth 2.1）强制 audience 校验但**未定义 per-tool / per-parameter 授权**。[^D1][^D3][^M1]
 
-`[INFER]` 主流是「DB 层 RBAC/RLS + 框架层粗粒度 RBAC」，缺少「把一次授权签名绑定到具体 tool + 参数（含 SQL 文本）」的环节。
+`[FACT/INFER]` 分四层看，避免把已有工作误写成空白：①数据库层 RLS/RBAC 主要控制**数据访问权限**（谁可读哪些行/列），不覆盖「哪次批准对应哪条查询」；②应用层**参数级审批已有成熟设计原则**（OWASP AI Agent Security / Transaction Authorization Cheat Sheet 要求审批绑定规范化参数、参数变化后重新批准、执行前原子消费）[^W1][^W2]；③尚待验证的是——**当独立授权方与数据库执行方分离时，密码学授权凭证能否带来额外保证**，这是研究假设而非已证缺口；④**不能仅凭 MCP OAuth 的 Server 级 `resource` 语义，就推导出 Text-to-SQL 场景也存在同样的协议缺口**——两者协议与应用结构不同。
 
 ### 2.4 风险证据 `[FACT]`
 
@@ -102,7 +102,7 @@ PostgreSQL RLS（default-deny、按 user/role/命令、security-barrier qual）�
 
 ### 2.6 本框架可补缺口 `[INFER]`
 
-Binding + `arguments_digest`（绑定 tool + 参数含 SQL 文本，防参数篡改与 MCP confused deputy；MCP 规范只绑 token 到 server、不绑 tool/arg，是真实空白）；D11 状态机（planned/in-flight/committed/failed，缓解重试重复副作用）；Receipt（不可抵赖执行记录，补 MCP8 要求的 immutable audit）；Journal（独立权威日志与恢复）；D10 请求级配额（须证明相对 Vanna quota / Genie budget 的确定性增量）。
+Binding（候选：把独立授权方的批准绑定到规范化 SQL 参数；**参数级审批原则本身已有，不是空白**；待证增量仅在授权方与 DB 执行方跨信任域分离时）；D11 状态机（planned/in-flight/committed/failed，缓解重试重复副作用）；Receipt（不可抵赖执行记录，补 MCP8 建议的 immutable audit；价值须落到独立验证者能验证什么）；Journal（独立权威日志与恢复）；D10 请求级配额（须证明相对 Vanna quota / Genie budget 的确定性增量）。**本节不沿用「MCP 规范只绑 Server、故 Text-to-SQL 也有协议缺口」的推论**（见 §2.3）。
 
 **明确不做** `[FACT]`：不声称解决 Prompt Injection；绑定能防「参数被改」，不能防「LLM 在已授予权限内生成泄露性 SQL」。
 
