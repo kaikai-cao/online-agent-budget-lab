@@ -22,7 +22,12 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .models import ExecutionEvent, ExecStatus
+from .models import (
+    LEGAL_TRANSITIONS,
+    ExecutionEvent,
+    ExecStatus,
+    is_legal_transition,
+)
 
 
 class EventWitness:
@@ -99,12 +104,30 @@ class EventWitness:
             return event
 
     def advance_status(self, event_id: str, new_status: str) -> bool:
-        """Advance the registered event's status. Only the witness may call this."""
+        """Advance status ONLY along a legal transition. Only witness may call.
+
+        Enforcement (this is the whole point of the state machine):
+          * new_status must be a DEFINED ExecStatus value;
+          * (old_status, new_status) must be in LEGAL_TRANSITIONS;
+          * on rejection the DB row (status AND signature) is left UNCHANGED;
+          * FINALIZED has an empty outgoing set -> irreversible;
+          * UNCERTAIN -> FINALIZED is illegal; only UNCERTAIN -> CORRECTED is
+            allowed, so the uncertain-bypass path cannot settle directly.
+
+        Returns True iff a legal transition was applied.
+        """
+        # 1. undefined status string -> reject before touching the DB
+        if new_status not in {s.value for s in ExecStatus}:
+            return False
         with closing(self._connect()) as con:
             row = con.execute(
                 "SELECT * FROM execution_events WHERE event_id=?", (event_id,)
             ).fetchone()
             if row is None:
+                return False
+            old_status = row["status"]
+            # 2. illegal jump -> reject, no write, record byte-identical
+            if not is_legal_transition(old_status, new_status):
                 return False
             event = ExecutionEvent(
                 run_id=row["run_id"], service_id=row["service_id"],

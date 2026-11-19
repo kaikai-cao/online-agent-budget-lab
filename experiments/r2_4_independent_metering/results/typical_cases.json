@@ -6,6 +6,20 @@
       ]
     },
     "attack": "service_under_reports_A",
+    "coordinator_deleted_event_ids": [],
+    "coordinator_submitted_usage_events": [
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T2-t00:A:op1:att0",
+        "operation_id": "op1",
+        "run_id": "run-T2-t00",
+        "signature": "kbVwUG0wJYsXyaHWenrlVsFnEj84r8rJQHPxXt3OhYdVe54r1DfwChfTyPUSmPn6Jyjs7S6Qt2HBjVjTkxZtCQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 300
+      }
+    ],
     "execution_events": [
       {
         "attempt_id": "att0",
@@ -128,6 +142,19 @@
       }
     },
     "seed": 20261119,
+    "service_db_usage_events": [
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T2-t00:A:op1:att0",
+        "operation_id": "op1",
+        "run_id": "run-T2-t00",
+        "signature": "kbVwUG0wJYsXyaHWenrlVsFnEj84r8rJQHPxXt3OhYdVe54r1DfwChfTyPUSmPn6Jyjs7S6Qt2HBjVjTkxZtCQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 300
+      }
+    ],
     "trial": 0,
     "usage_events": [
       {
@@ -159,6 +186,31 @@
       ]
     },
     "attack": "two_distinct_attempts_not_deduped",
+    "coordinator_deleted_event_ids": [],
+    "coordinator_submitted_usage_events": [
+      {
+        "attempt_id": "att1",
+        "event_id": "run-T6-t00:A:op1:att1",
+        "operation_id": "op1",
+        "run_id": "run-T6-t00",
+        "signature": "LurhZNXDXIu2mxGixymkMsLJlHmtVJS/qjV1Eatp5SAX3UGQRFOS9mh4mCC6P9Fz1CopCLjLRrB4rIWG03AJBw==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 30
+      },
+      {
+        "attempt_id": "att2",
+        "event_id": "run-T6-t00:A:op1:att2",
+        "operation_id": "op1",
+        "run_id": "run-T6-t00",
+        "signature": "r+qyEclg8kku7md4287q9+4GmnZN+f5KXjyDdb+k1dQYzVlADJj1vg0AL20obEXkrleT3tP13tMDZhxDzI6EAQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 20
+      }
+    ],
     "execution_events": [
       {
         "attempt_id": "att1",
@@ -238,6 +290,30 @@
       }
     },
     "seed": 20261119,
+    "service_db_usage_events": [
+      {
+        "attempt_id": "att1",
+        "event_id": "run-T6-t00:A:op1:att1",
+        "operation_id": "op1",
+        "run_id": "run-T6-t00",
+        "signature": "LurhZNXDXIu2mxGixymkMsLJlHmtVJS/qjV1Eatp5SAX3UGQRFOS9mh4mCC6P9Fz1CopCLjLRrB4rIWG03AJBw==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 30
+      },
+      {
+        "attempt_id": "att2",
+        "event_id": "run-T6-t00:A:op1:att2",
+        "operation_id": "op1",
+        "run_id": "run-T6-t00",
+        "signature": "r+qyEclg8kku7md4287q9+4GmnZN+f5KXjyDdb+k1dQYzVlADJj1vg0AL20obEXkrleT3tP13tMDZhxDzI6EAQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 20
+      }
+    ],
     "trial": 0,
     "usage_events": [
       {
@@ -274,6 +350,31 @@
       ]
     },
     "attack": "service_false_metering_actual_250_reported_100",
+    "coordinator_deleted_event_ids": [],
+    "coordinator_submitted_usage_events": [
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T7-t00:A:op1:att0",
+        "operation_id": "op1",
+        "run_id": "run-T7-t00",
+        "signature": "N3UZzpvS2DpBtS0P1NKEyexM+TsxzAkPvw5lQ8Rgs/0P4DC/VIcEj7/Zy5fHMtCXnpw5h6dWQWJXSsV/fqAMBQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 100
+      },
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T7-t00:B:op2:att0",
+        "operation_id": "op2",
+        "run_id": "run-T7-t00",
+        "signature": "aPKxRXHBDkH+SuOnKFsXBPXE3NUu2lbjNyevMlFtSSmR8fOWRXZe7/dIRoKi13ZobI0Mf7hdW6QGdzHAJJvLCQ==",
+        "source_id": "B",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 200
+      }
+    ],
     "execution_events": [
       {
         "attempt_id": "att0",
@@ -370,6 +471,30 @@
       }
     },
     "seed": 20261119,
+    "service_db_usage_events": [
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T7-t00:A:op1:att0",
+        "operation_id": "op1",
+        "run_id": "run-T7-t00",
+        "signature": "N3UZzpvS2DpBtS0P1NKEyexM+TsxzAkPvw5lQ8Rgs/0P4DC/VIcEj7/Zy5fHMtCXnpw5h6dWQWJXSsV/fqAMBQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 100
+      },
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T7-t00:B:op2:att0",
+        "operation_id": "op2",
+        "run_id": "run-T7-t00",
+        "signature": "aPKxRXHBDkH+SuOnKFsXBPXE3NUu2lbjNyevMlFtSSmR8fOWRXZe7/dIRoKi13ZobI0Mf7hdW6QGdzHAJJvLCQ==",
+        "source_id": "B",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 200
+      }
+    ],
     "trial": 0,
     "usage_events": [
       {

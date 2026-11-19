@@ -46,7 +46,7 @@ src/r24/
   scenarios.py     T1-T8 scenarios, deterministic seeds, >=10 trials
 scripts/
   run_experiments.py   full matrix runner + artifact generation
-tests/               one file per scenario family (11 tests)
+tests/               one file per scenario family + state machine (18 tests)
 results/
   raw_results.jsonl    80 rows (8 scenarios x 10 trials), full evidence
   summary.json         capability matrix / detection / FP / FN / control
@@ -59,7 +59,7 @@ results/
 From this directory, using the repo venv:
 
 ```bash
-# unit tests (11)
+# unit tests (18)
 ../../.venv/Scripts/python -m unittest discover -s tests -v
 
 # full experiment matrix -> rewrites results/*
@@ -74,8 +74,8 @@ per scenario, so results are reproducible.
 | ID | Scenario | A | B | C |
 | --- | --- | --- | --- | --- |
 | T1 | normal (300+200=500) | accept | accept | accept |
-| T2 | service under-reporting | blind | MISSING_USAGE_EVENT | MISSING_USAGE_EVENT |
-| T3 | coordinator deletes metering record | blind | MISSING_USAGE_EVENT | MISSING_USAGE_EVENT |
+| T2 | service under-reporting (never submits) | blind | MISSING_USAGE_EVENT | MISSING_USAGE_EVENT |
+| T3 | coordinator drops record from aggregation input (service DB keeps it) | blind | MISSING_USAGE_EVENT | MISSING_USAGE_EVENT |
 | T4 | tamper signed value | INVALID_SIGNATURE | INVALID_SIGNATURE | INVALID_SIGNATURE |
 | T5 | duplicate report | DUPLICATE (count once / conflict reject) | same | same |
 | T6 | two attempts 30+20 | accept (50) | accept (50) | accept (50) |
@@ -84,6 +84,25 @@ per scenario, so results are reproducible.
 
 T7 is the flagship control: a witness that registers *intent* cannot prove a
 numeric value. Only an independent *observation* can cross-check it.
+
+## Enforced state machine (not just documented)
+
+`EventWitness.advance_status()` enforces `LEGAL_TRANSITIONS`: illegal jumps and
+undefined status strings are rejected and the DB row is left byte-identical.
+FINALIZED is terminal; UNCERTAIN can only reach FINALIZED via CORRECTED, so an
+uncertain event cannot silently settle as zero. `tests/test_state_machine.py`
+covers illegal jumps (incl. REGISTERED->FINALIZED, DISPATCHED->FINALIZED),
+repeated terminal transition, uncertain-bypass, undefined states and no-change-
+on-reject.
+
+## How to read the 100% / 0% numbers
+
+They are the **expected-behaviour conformance rate** over 8 pre-constructed
+scenarios x 10 deterministic repetitions (verdict set matched the declared
+capability matrix). They are NOT a real attack detection rate, NOT detection of
+unknown attacks, NOT a statistically meaningful false-positive rate, and NOT a
+production guarantee. The 80 records are repetitions of 8 known scenario types,
+not 80 independent real attacks.
 
 ## Boundaries (do not overstate)
 

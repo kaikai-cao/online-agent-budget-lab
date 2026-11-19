@@ -1,6 +1,6 @@
 # R2.4 Phase-1 — Independent Event Witness & Trustworthy Metering
 
-Generated: 2026-11-19T11:37:04.782362+00:00
+Generated: 2026-11-19T11:46:30.642480+00:00
 Seed base: 20261119 · trials/scenario: 10 · total trial records: 80
 
 ## Scope boundary (read first)
@@ -19,6 +19,15 @@ Seed base: 20261119 · trials/scenario: 10 · total trial records: 80
 ## Verdict taxonomy (never collapsed to a single 'INVALID')
 
 ACCEPTED · MISSING_USAGE_EVENT · DUPLICATE_USAGE_EVENT · INVALID_SIGNATURE · USAGE_MISMATCH · INCOMPLETE_EXECUTION_STATUS · UNKNOWN_EVENT · INVALID_EVENT_LINKAGE
+
+## Enforced execution status machine
+
+REGISTERED -> DISPATCHED -> {MEASURED | PARTIAL | UNCERTAIN}; MEASURED/PARTIAL/UNCERTAIN -> CORRECTED -> FINALIZED. `EventWitness.advance_status()` NOW ENFORCES `LEGAL_TRANSITIONS`: undefined status strings and illegal jumps are rejected with the DB row (status AND signature) left byte-identical. FINALIZED is terminal (irreversible); UNCERTAIN -> FINALIZED is illegal (must pass CORRECTED), so an uncertain event cannot settle directly. 7 dedicated tests (test_state_machine.py) cover illegal jumps, repeated terminal transition, uncertain-bypass and undefined states.
+
+## T2 vs T3 — two distinct attacks, both surfacing as MISSING_USAGE_EVENT
+
+- **T2 service under-reporting**: the service never submits a metering record (service DB holds only 1 usage row). The verifier is given exactly what the service emitted.
+- **T3 coordinator deletion from aggregation input**: the service DB DOES hold a valid signed usage record (ground truth = 2 rows); the untrusted coordinator drops one row from the aggregation input it submits to the verifier (submitted = 1 row, `coordinator_deleted_event_ids` records the dropped id). Witness keeps the full registration. Each raw record carries both `service_db_usage_events` and `coordinator_submitted_usage_events` so the two attacks are auditable.
 
 ## Capability & metrics (detection / false-positive / false-negative)
 
@@ -53,6 +62,10 @@ Notes on rates:
 - `detection`/`FN` are `N/A` when a scheme is *expected to be blind* (no expected verdict): that is by design, not a missing measurement.
 - FP = a verdict appeared that the scenario's `absent` matrix says must not appear (e.g. A falsely 'detecting' an omission it cannot see).
 - T6 is a normal multi-attempt case: any DUPLICATE/INCOMPLETE verdict would be a false positive; the matrix confirms none.
+
+### How to read 100% detection / 0% false-positive (IMPORTANT)
+- These numbers are the **expected-behaviour conformance rate** of 8 pre-constructed scenarios x 10 deterministic repetitions each: in each trial the observed verdict set matched the pre-declared capability matrix. They are NOT a real-world attack detection rate, NOT detection of unknown attacks, NOT a statistically meaningful low false-positive rate, and NOT a production security guarantee.
+- The 80 raw records are 80 repetitions of 8 known scenario types, NOT 80 independent real attack samples. Do not report them as such.
 
 ## Flagship control — T7
 

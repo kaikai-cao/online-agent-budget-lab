@@ -86,6 +86,12 @@ class TrialRecord:
     # full event evidence (for independent audit / typical-case display)
     execution_events: list[dict[str, Any]] = field(default_factory=list)
     usage_events: list[dict[str, Any]] = field(default_factory=list)
+    # Ground truth in service DBs (may differ from what coordinator submits).
+    service_db_usage_events: list[dict[str, Any]] = field(default_factory=list)
+    # What the (untrusted) coordinator actually submitted to the verifier.
+    coordinator_submitted_usage_events: list[dict[str, Any]] = field(default_factory=list)
+    # event_ids the coordinator deliberately dropped from the aggregation input.
+    coordinator_deleted_event_ids: list[str] = field(default_factory=list)
     observations: list[dict[str, Any]] = field(default_factory=list)
     key_fingerprints: dict[str, str] = field(default_factory=dict)
     # per-scheme outcome
@@ -100,6 +106,9 @@ class TrialRecord:
             "run_id": self.run_id, "attack": self.attack,
             "execution_events": self.execution_events,
             "usage_events": self.usage_events,
+            "service_db_usage_events": self.service_db_usage_events,
+            "coordinator_submitted_usage_events": self.coordinator_submitted_usage_events,
+            "coordinator_deleted_event_ids": self.coordinator_deleted_event_ids,
             "observations": self.observations,
             "key_fingerprints": self.key_fingerprints,
             "schemes": self.schemes,
@@ -109,6 +118,29 @@ class TrialRecord:
 
 def _eid(run_id: str, svc: str, op: str, attempt: str) -> str:
     return f"{run_id}:{svc}:{op}:{attempt}"
+
+
+def _walk_status(witness, event_id: str, target: str) -> None:
+    """Walk from REGISTERED to target along LEGAL transitions only.
+
+    REGISTERED -> DISPATCHED -> {MEASURED | UNCERTAIN};
+    MEASURED -> FINALIZED.  Every step must be accepted by the witness's
+    enforced state machine; a rejected step is a scenario bug, so assert.
+    """
+    steps: list[str] = [ExecStatus.DISPATCHED.value]
+    if target == ExecStatus.UNCERTAIN.value:
+        steps.append(ExecStatus.UNCERTAIN.value)
+    elif target == ExecStatus.MEASURED.value:
+        steps.append(ExecStatus.MEASURED.value)
+    elif target == ExecStatus.FINALIZED.value:
+        steps += [ExecStatus.MEASURED.value, ExecStatus.FINALIZED.value]
+    elif target != ExecStatus.DISPATCHED.value:
+        raise ValueError(f"no legal walk defined to {target}")
+    for st in steps:
+        if not witness.advance_status(event_id, st):
+            raise RuntimeError(
+                f"illegal/rejected transition {event_id} -> {st} (state machine enforcement)"
+            )
 
 
 def _register_and_emit(
@@ -123,8 +155,7 @@ def _register_and_emit(
         event_id=event_id, request_digest=f"sha256:req-{op}-{attempt}",
         registered_at=f"t-{witness.event_count()+1:03d}",
     )
-    witness.advance_status(event_id, ExecStatus.DISPATCHED.value)
-    witness.advance_status(event_id, final_status)
+    _walk_status(witness, event_id, final_status)
     ue = (svc_a if svc == "A" else svc_b).emit_usage(
         event_id=event_id, run_id=run_id, operation_id=op, attempt_id=attempt,
         reported_usage=reported, status=usage_status,
@@ -133,8 +164,13 @@ def _register_and_emit(
     return event_id, ee, ue, ob
 
 
-def _run_schemes(witness, svc_a, svc_b, observer, pubkeys) -> dict[str, Any]:
-    usage_events = svc_a.all_events() + svc_b.all_events()
+def _run_schemes(witness, svc_a, svc_b, observer, pubkeys,
+                 submitted_usage: list | None = None) -> dict[str, Any]:
+    # The verifier consumes whatever the (untrusted) coordinator SUBMITS, not
+    # necessarily the full service DB. Honest scenarios submit everything; T3
+    # deliberately omits one record from this list while the service DB keeps it.
+    usage_events = (list(submitted_usage) if submitted_usage is not None
+                    else svc_a.all_events() + svc_b.all_events())
     exec_events = witness.all_events()
     observations = observer.all_observations()
     base = VerifyContext(usage_events=usage_events, service_pubkeys=pubkeys)
@@ -193,6 +229,8 @@ def run_trial(scenario: str, trial: int, workroot: Path | None = None) -> TrialR
     observer = MeteringObserver("observer-01", wd / "observer.sqlite3", o_key)
 
     attack = "none"
+    submitted_usage: list | None = None       # verifier input (coordinator aggregation)
+    coordinator_deleted_ids: list[str] = []   # records dropped by coordinator
     if scenario == "T1":
         # normal: A=300, B=200 -> 500
         _register_and_emit(witness, svc_a, svc_b, observer, run_id, "op1", "att0", "A", 300, 300)
@@ -205,17 +243,23 @@ def run_trial(scenario: str, trial: int, workroot: Path | None = None) -> TrialR
         eid2 = _eid(run_id, "B", "op2", "att0")
         ee2 = witness.register_intent(run_id, "B", "op2", "att0", eid2,
                                       "sha256:req-op2-att0", "t-003")
-        witness.advance_status(eid2, ExecStatus.DISPATCHED.value)
-        witness.advance_status(eid2, ExecStatus.FINALIZED.value)
+        _walk_status(witness, eid2, ExecStatus.FINALIZED.value)
         # NO svc emit -> missing usage in real service DB
         observer.observe(event_id=eid2, observed_usage=200)
 
     elif scenario == "T3":
-        # coordinator deletes an already-submitted, already-registered metering row
-        attack = "coordinator_deletes_usage_record"
+        # Coordinator deletes a metering row from the AGGREGATION INPUT it
+        # submits to the verifier. Distinct from T2: here the service DB DOES
+        # hold a valid signed usage event (ground truth intact); only the
+        # untrusted coordinator's summary omits it. Witness keeps full record.
+        attack = "coordinator_deletes_from_aggregation_input"
         _register_and_emit(witness, svc_a, svc_b, observer, run_id, "op1", "att0", "A", 300, 300)
         eid2, _, _, _ = _register_and_emit(witness, svc_a, svc_b, observer, run_id, "op2", "att0", "B", 200, 200)
-        svc_b.suppress_usage(eid2)  # delete REAL row from service DB
+        # service DB still contains BOTH records; coordinator drops eid2 when
+        # building the aggregation input handed to the verifier.
+        coordinator_deleted_ids = [eid2]
+        submitted_usage = [u for u in (svc_a.all_events() + svc_b.all_events())
+                           if u.event_id != eid2]
 
     elif scenario == "T4":
         # tamper signed value without re-signing
@@ -256,18 +300,24 @@ def run_trial(scenario: str, trial: int, workroot: Path | None = None) -> TrialR
         eid2 = _eid(run_id, "B", "op2", "att0")
         witness.register_intent(run_id, "B", "op2", "att0", eid2,
                                 "sha256:req-op2-att0", "t-003")
-        witness.advance_status(eid2, ExecStatus.DISPATCHED.value)
-        witness.advance_status(eid2, ExecStatus.UNCERTAIN.value)  # stuck
+        _walk_status(witness, eid2, ExecStatus.UNCERTAIN.value)  # stuck at UNCERTAIN
         # no usage emitted for eid2; a naive aggregator would bill 0 silently
         observer.observe(event_id=eid2, observed_usage=200)
     else:
         raise ValueError(f"unknown scenario {scenario}")
 
-    schemes = _run_schemes(witness, svc_a, svc_b, observer, pubkeys)
+    service_db_usage = svc_a.all_events() + svc_b.all_events()
+    submitted_for_verify = (submitted_usage if submitted_usage is not None
+                            else list(service_db_usage))
+    schemes = _run_schemes(witness, svc_a, svc_b, observer, pubkeys,
+                           submitted_usage=submitted_for_verify)
     rec = TrialRecord(
         scenario=scenario, trial=trial, seed=seed, run_id=run_id, attack=attack,
         execution_events=[e.to_dict() for e in witness.all_events()],
-        usage_events=[u.to_dict() for u in svc_a.all_events() + svc_b.all_events()],
+        usage_events=[u.to_dict() for u in submitted_for_verify],
+        service_db_usage_events=[u.to_dict() for u in service_db_usage],
+        coordinator_submitted_usage_events=[u.to_dict() for u in submitted_for_verify],
+        coordinator_deleted_event_ids=coordinator_deleted_ids,
         observations=[o.to_dict() for o in observer.all_observations()],
         key_fingerprints={
             "witness": public_key_fingerprint(pubkeys["witness"]),

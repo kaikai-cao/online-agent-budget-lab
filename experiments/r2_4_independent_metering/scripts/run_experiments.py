@@ -136,6 +136,31 @@ def write_report(matrix, control, n_records):
                  "INVALID_SIGNATURE · USAGE_MISMATCH · INCOMPLETE_EXECUTION_STATUS · "
                  "UNKNOWN_EVENT · INVALID_EVENT_LINKAGE")
     lines.append("")
+    lines.append("## Enforced execution status machine")
+    lines.append("")
+    lines.append("REGISTERED -> DISPATCHED -> {MEASURED | PARTIAL | UNCERTAIN}; "
+                 "MEASURED/PARTIAL/UNCERTAIN -> CORRECTED -> FINALIZED. "
+                 "`EventWitness.advance_status()` NOW ENFORCES `LEGAL_TRANSITIONS`: "
+                 "undefined status strings and illegal jumps are rejected with the DB "
+                 "row (status AND signature) left byte-identical. FINALIZED is terminal "
+                 "(irreversible); UNCERTAIN -> FINALIZED is illegal (must pass CORRECTED), "
+                 "so an uncertain event cannot settle directly. 7 dedicated tests "
+                 "(test_state_machine.py) cover illegal jumps, repeated terminal "
+                 "transition, uncertain-bypass and undefined states.")
+    lines.append("")
+    lines.append("## T2 vs T3 — two distinct attacks, both surfacing as MISSING_USAGE_EVENT")
+    lines.append("")
+    lines.append("- **T2 service under-reporting**: the service never submits a metering "
+                 "record (service DB holds only 1 usage row). The verifier is given "
+                 "exactly what the service emitted.")
+    lines.append("- **T3 coordinator deletion from aggregation input**: the service DB "
+                 "DOES hold a valid signed usage record (ground truth = 2 rows); the "
+                 "untrusted coordinator drops one row from the aggregation input it "
+                 "submits to the verifier (submitted = 1 row, `coordinator_deleted_event_ids` "
+                 "records the dropped id). Witness keeps the full registration. Each "
+                 "raw record carries both `service_db_usage_events` and "
+                 "`coordinator_submitted_usage_events` so the two attacks are auditable.")
+    lines.append("")
     lines.append("## Capability & metrics (detection / false-positive / false-negative)")
     lines.append("")
     lines.append("| Scenario | Scheme | Expected verdicts | Detection | FP rate | FN rate |")
@@ -156,6 +181,16 @@ def write_report(matrix, control, n_records):
                  "must not appear (e.g. A falsely 'detecting' an omission it cannot see).")
     lines.append("- T6 is a normal multi-attempt case: any DUPLICATE/INCOMPLETE verdict "
                  "would be a false positive; the matrix confirms none.")
+    lines.append("")
+    lines.append("### How to read 100% detection / 0% false-positive (IMPORTANT)")
+    lines.append("- These numbers are the **expected-behaviour conformance rate** of "
+                 "8 pre-constructed scenarios x 10 deterministic repetitions each: "
+                 "in each trial the observed verdict set matched the pre-declared "
+                 "capability matrix. They are NOT a real-world attack detection rate, "
+                 "NOT detection of unknown attacks, NOT a statistically meaningful "
+                 "low false-positive rate, and NOT a production security guarantee.")
+    lines.append("- The 80 raw records are 80 repetitions of 8 known scenario types, "
+                 "NOT 80 independent real attack samples. Do not report them as such.")
     lines.append("")
     lines.append("## Flagship control — T7")
     lines.append("")
