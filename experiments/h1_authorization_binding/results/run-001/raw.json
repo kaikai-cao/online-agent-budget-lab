@@ -75,21 +75,6 @@
     "expect_c": "REJECTED"
   },
   {
-    "scenario": "expired_authorization",
-    "b2": {
-      "outcome": "REJECTED",
-      "reason": "B2_DENIED:EXPIRED"
-    },
-    "c": {
-      "outcome": "REJECTED",
-      "reason": "C_EXPIRED"
-    },
-    "effects_b2": 0,
-    "effects_c": 0,
-    "expect_b2": "REJECTED",
-    "expect_c": "REJECTED"
-  },
-  {
     "scenario": "revoked_b2_denies",
     "b2": {
       "outcome": "REJECTED",
@@ -178,6 +163,19 @@
     "effects_c": 0,
     "expect_b2": "EXECUTED",
     "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "expired_authorization",
+    "b2": {
+      "outcome": "REJECTED",
+      "reason": "B2_DENIED:EXPIRED"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "CREDENTIAL_ISSUANCE_REFUSED:EXPIRED"
+    },
+    "effects_b2": 0,
+    "effects_c": 0
   },
   {
     "scenario": "replay_sequential",

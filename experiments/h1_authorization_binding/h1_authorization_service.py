@@ -3,9 +3,10 @@
 Two verification paths are served from the SAME trusted user-confirmation flow:
 
 - B2 (online): the Authorization Service keeps authorization records and answers
-  online queries over a real trusted TLS channel. The Executor pins the service
-  certificate fingerprint. B2 carries NO application-layer signed credential;
-  it在线 trusts the service's current authorization state. TLS/mTLS here is
+  online queries over a real trusted TCP+TLS JSON channel. The Executor pins the
+  service SERVER certificate fingerprint. B2 carries NO application-layer signed
+  credential; it在线 trusts the service's current authorization state. The TCP+TLS
+  channel (server-certificate fingerprint pinning, NOT HTTPS and NOT mTLS) is
   transport protection and is NOT an application-level action credential.
   When the service is unreachable, B2 fails closed.
 
@@ -54,6 +55,22 @@ DEFAULT_KEY_ID = "h1-key-1"
 
 STATE_ACTIVE = "ACTIVE"
 STATE_REVOKED = "REVOKED"
+
+
+class CredentialIssuanceError(ValueError):
+    """Authorization Service refused to sign a credential for an authorization.
+
+    This is an *issuance-time* refusal only. It does not change the verification
+    semantics of a credential that was already signed: a credential signed while
+    ACTIVE and unexpired remains locally verifiable offline, and a later
+    revocation is still not visible to that offline credential (H1 architecture
+    tradeoff). The `reason` attribute is stable for tests:
+    UNKNOWN_JTI / REVOKED / EXPIRED.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"CREDENTIAL_ISSUANCE_REFUSED:{reason}")
 
 
 @dataclass
@@ -145,11 +162,24 @@ class AuthorizationService:
 
     # ---- C local credential ----
 
-    def issue_credential(self, jti: str) -> dict[str, Any]:
-        """Sign the full authorization object into an Ed25519 credential."""
+    def issue_credential(self, jti: str, *, now: float | None = None) -> dict[str, Any]:
+        """Sign the full authorization object into an Ed25519 credential.
+
+        Issuance-time guard: only an existing, ACTIVE, not-yet-expired record may
+        be signed. A record revoked or expired *before* issuance is refused with
+        an explicit CredentialIssuanceError. This does NOT alter the semantics
+        of a credential that was already signed while valid: signing it early and
+        revoking afterwards still leaves the offline C verifier unable to see the
+        revocation (the H1 availability/freshness tradeoff is preserved).
+        """
         rec = self._records.get(jti)
         if rec is None:
-            raise KeyError(f"unknown jti: {jti}")
+            raise CredentialIssuanceError("UNKNOWN_JTI")
+        if rec.state == STATE_REVOKED:
+            raise CredentialIssuanceError("REVOKED")
+        now = self._clock() if now is None else now
+        if now >= rec.auth.expires_at:
+            raise CredentialIssuanceError("EXPIRED")
         payload = credential_payload(rec.auth.as_dict())
         payload["issuer"] = self.issuer
         payload["audience"] = self.audience

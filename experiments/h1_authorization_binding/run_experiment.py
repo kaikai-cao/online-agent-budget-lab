@@ -36,6 +36,7 @@ from h1_authorization_service import (  # noqa: E402
     AuthorizationService,
     AuthServiceTLSServer,
     B2OnlineVerifier,
+    CredentialIssuanceError,
 )
 from h1_executor import Executor, VerificationError  # noqa: E402
 from h1_protocol import ActionRequest, compute_action_digest  # noqa: E402
@@ -224,7 +225,6 @@ def run_matrix(workdir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]
     def mut_executor(r: dict[str, Any]) -> dict[str, Any]:
         r["executor_id"] = "executor-attacker"; return r
 
-    now = time.time()
     scenario("legal_allow", lambda h: paired(
         h, req=fresh_request(), expect_b2="EXECUTED", expect_c="EXECUTED"))
     scenario("tamper_arguments", lambda h: paired(
@@ -235,8 +235,6 @@ def run_matrix(workdir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]
         h, req=fresh_request(), mutate=mut_server, expect_b2="REJECTED", expect_c="REJECTED"))
     scenario("executor_mismatch", lambda h: paired(
         h, req=fresh_request(), mutate=mut_executor, expect_b2="REJECTED", expect_c="REJECTED"))
-    scenario("expired_authorization", lambda h: paired(
-        h, req=fresh_request(), ttl=-1.0, now=now, expect_b2="REJECTED", expect_c="REJECTED"))
     scenario("revoked_b2_denies", lambda h: paired(
         h, req=fresh_request(), revoke=True, expect_b2="REJECTED", expect_c="EXECUTED"))
     scenario("credential_tamper", lambda h: paired(
@@ -255,6 +253,30 @@ def run_matrix(workdir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]
     scenario("c_wrong_issuer", lambda h: paired(
         h, req=fresh_request(), cred_claim_overrides={"issuer": "attacker-issuer"},
         expect_b2="EXECUTED", expect_c="REJECTED"))
+
+    # Expired authorization: B2 denies at online query; C is refused at the
+    # issuance entry (no credential is produced). Kept as a dedicated helper
+    # because issuance is now guarded and cannot yield an expired credential.
+    def scenario_expired(h: Harness) -> dict[str, Any]:
+        req = fresh_request()
+        t = time.time()
+        jti_b2 = f"jti-{uuid.uuid4().hex}"
+        h.auth.confirm(request=req, jti=jti_b2, ttl_seconds=-1.0, now=t)
+        h.mark()
+        r_b2 = h.run_b2(request=req, auth_ref=h.auth_ref(jti_b2))
+        e_b2 = h.effects_added()
+        ok_b2 = r_b2["outcome"] == "REJECTED" and "EXPIRED" in r_b2["reason"]
+        rows.append(_row("expired_authorization", "B2", "REJECTED(EXPIRED)", r_b2, e_b2, ok_b2))
+        jti_c = f"jti-{uuid.uuid4().hex}"
+        h.auth.confirm(request=req, jti=jti_c, ttl_seconds=-1.0, now=t)
+        try:
+            h.auth.issue_credential(jti_c, now=t)
+            r_c = {"outcome": "UNEXPECTEDLY_ISSUED", "reason": "ISSUANCE_GUARD_FAILED"}
+        except CredentialIssuanceError as exc:
+            r_c = {"outcome": "REJECTED", "reason": f"CREDENTIAL_ISSUANCE_REFUSED:{exc.reason}"}
+        ok_c = r_c["outcome"] == "REJECTED" and "EXPIRED" in r_c["reason"]
+        rows.append(_row("expired_authorization", "C", "REJECTED(EXPIRED at issuance)", r_c, 0, ok_c))
+        return {"b2": r_b2, "c": r_c, "effects_b2": e_b2, "effects_c": 0}
 
     # Replay / concurrency / crash use dedicated helpers.
     def scenario_replay(h: Harness) -> dict[str, Any]:
@@ -339,6 +361,7 @@ def run_matrix(workdir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]
                          r_c, e_c, ok_c))
         return {"b2": r_b2, "c": r_c, "effects_b2": e_b2, "effects_c": e_c}
 
+    scenario("expired_authorization", scenario_expired)
     scenario("replay_sequential", scenario_replay)
     scenario("replay_concurrent", scenario_concurrent)
     scenario("crash_rollback", scenario_crash)

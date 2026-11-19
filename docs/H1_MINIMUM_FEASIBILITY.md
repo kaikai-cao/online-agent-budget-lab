@@ -29,7 +29,7 @@
 不可信 Planner ──工具请求 + 授权引用──> Executor
                                           │ ① 重算 action_digest（不信 Planner 提供的）
 用户确认(可信界面) ──> Authorization Service
-                        ├─ B2：在线授权记录查询（真实 TLS + 证书固定）
+                        ├─ B2：在线授权记录查询（TCP + TLS，服务器证书指纹固定）
                         └─ C ：Ed25519 签发一次性凭证
                                           │ ② 验证：B2 在线查询 / C 本地验签
                                           │ ③ 共同下游：绑定检查 → 原子消费 jti
@@ -42,16 +42,16 @@ Authorization Service 与 Executor 分属两个信任域：**B2 的 Executor 在
 
 1. 用户通过可信确认入口确认动作 → 服务保存授权记录（状态 `ACTIVE`）。
 2. Planner 提交 `approval_id`(jti) 与工具请求给 Executor。
-3. Executor 对实际请求重算 `action_digest`，连同 `jti`、`executor_id` 经**真实 TLS 通道**（客户端证书固定）查询服务。
+3. Executor 对实际请求重算 `action_digest`，连同 `jti`、`executor_id` 经**真实 TCP + TLS 通道**（固定授权服务的**服务器证书指纹**）查询服务；不是 HTTPS，也不是双向 TLS（mTLS）。
 4. 服务校验：jti 存在、未撤销、未过期、`action_digest` 匹配、目标执行器匹配。
 5. 通过 → Executor 原子消费 jti 并提交受控副作用。
-6. **服务不可达 / 证书固定失败 → fail closed（拒绝）**。
+6. **服务不可达 / 服务器证书指纹不匹配 → fail closed（拒绝）**。
 7. B2 **不签发任何应用层 Ed25519 动作授权凭证**。
 
 ### 2.3 C：本地签名凭证验证
 
 1. 用户通过**同一**可信确认入口确认**同一**动作。
-2. 服务对完整授权对象签发 Ed25519 凭证（含 issuer/audience/key_id/version）。
+2. 服务对完整授权对象签发 Ed25519 凭证（含 issuer/audience/key_id/version）。**签发入口约束**：仅当授权记录存在、状态 `ACTIVE` 且当前时间未达 `expires_at` 时才签发；签发前已撤销或已过期的授权被 `CredentialIssuanceError`（reason `REVOKED` / `EXPIRED` / `UNKNOWN_JTI`）拒绝。该约束只管签发时刻，不改变已签发凭证的验证语义（见第 6 节撤销时序）。
 3. Planner 提交凭证与工具请求给 Executor。
 4. Executor 用**预置可信公钥**（按 `key_id` 索引）本地验签，检查 domain/version/issuer/audience/key_id/jti/有效期。
 5. Executor 对实际请求重算 `action_digest` 并与签名声明比对。
@@ -93,7 +93,7 @@ Authorization Service 与 Executor 分属两个信任域：**B2 的 Executor 在
 ## 5. 测试矩阵及实际结果
 
 运行：`PYTHONPATH="src;tests;experiments/h1_authorization_binding" .venv/Scripts/python experiments/h1_authorization_binding/run_experiment.py --output-dir .../results/run-001`
-结果：**29 项检查全部通过**（`summary.json`: total 29 / passed 29 / failed 0）。专项 unittest **19 项通过**。逐行数据见 `trials.csv`，原始细节见 `raw.json`。
+结果：**29 项检查全部通过**（`summary.json`: total 29 / passed 29 / failed 0）。专项 unittest **23 项通过**（含验收修复新增的 4 项签发约束测试）。逐行数据见 `trials.csv`，原始细节见 `raw.json`。
 
 | 场景 | B2 实际 | C 实际 | 说明 |
 |---|---|---|---|
@@ -102,11 +102,12 @@ Authorization Service 与 Executor 分属两个信任域：**B2 的 Executor 在
 | 修改工具 Schema | REJECTED | REJECTED | 同上 |
 | 修改 Server URI | REJECTED | REJECTED | 同上 |
 | 目标 Executor 不匹配 | REJECTED `EXECUTOR_TARGET_MISMATCH` | REJECTED `EXECUTOR_TARGET_MISMATCH` | 执行器身份检查 |
-| 授权过期 | REJECTED `EXPIRED` | REJECTED `C_EXPIRED` | 有效期检查 |
+| 授权在签发前已过期 | REJECTED `B2_DENIED:EXPIRED`（在线查询） | REJECTED `CREDENTIAL_ISSUANCE_REFUSED:EXPIRED`（签发入口拒绝，无凭证、0 副作用） | 签发时刻检查有效期 |
 | 凭证签名被篡改 | EXECUTED（B2 不使用凭证，不受影响） | REJECTED `C_SIGNATURE_INVALID` | C 验签 |
 | C 未知 key_id / 错 audience / 错 issuer | EXECUTED | REJECTED（三类均拒） | **C 信任锚仅在预置集合** |
 | **授权服务不可达** | **REJECTED `AUTH_SERVICE_UNREACHABLE`（fail closed）** | **EXECUTED（离线验签）** | **核心架构差异** |
-| **授权被提前撤销** | **REJECTED `REVOKED`（在线可见）** | **EXECUTED（离线不知撤销）** | **核心架构权衡** |
+| **授权被提前撤销（签发后撤销）** | **REJECTED `B2_DENIED:REVOKED`（在线可见）** | **EXECUTED（离线不知撤销）** | **核心架构权衡；本行撤销发生在凭证签发之后** |
+| 授权在签发前已被撤销 | REJECTED `B2_DENIED:REVOKED` | REJECTED `CREDENTIAL_ISSUANCE_REFUSED:REVOKED`（签发入口拒绝，无凭证可签） | 签发入口约束；不得与上一行"签发后撤销"混淆 |
 | 同一 jti 顺序重放 | — | EXECUTED → DEDUP_HIT，1 副作用 | 原子消费 |
 | 同一 jti 并发重放（8 线程） | — | 1×EXECUTED / 7×DEDUP_HIT，1 副作用 | `BEGIN IMMEDIATE` 串行化 |
 | 提交前崩溃回滚后可重试 | — | ROLLED_BACK → EXECUTED → DEDUP_HIT，1 副作用 | 消费与副作用同事务回滚 |
@@ -115,7 +116,7 @@ Authorization Service 与 Executor 分属两个信任域：**B2 的 Executor 在
 | 两组共用消费存储 | B2 执行同 jti → C 同 jti = DEDUP_HIT，1 副作用 | | **消费公平性证据** |
 
 > 所有结果为 runner 实际调用模块后记录（`trials.csv` 的 `actual_outcome`/`actual_reason`/`effects_added`），非预填预期值。
-> B2 认真实现：真实 localhost TLS 服务、客户端证书固定、在线查询服务当前状态；不是硬编码放行的弱对照。
+> B2 认真实现：真实 localhost TCP + TLS 服务、固定服务器证书指纹、在线查询服务当前状态；不是 HTTPS / mTLS，也不是硬编码放行的弱对照。
 
 ---
 
@@ -124,12 +125,15 @@ Authorization Service 与 Executor 分属两个信任域：**B2 的 Executor 在
 | 维度 | B2（在线） | C（本地凭证） |
 |---|---|---|
 | 授权服务不可达 | fail closed，拒绝执行 | 有效凭证仍可本地验证并执行 |
-| 授权提前撤销 | 在线查询即时可见并拒绝 | 不感知，凭证到期前仍可用 |
-| 过期 | 在线拒绝 | 本地按 `expires_at` 拒绝 |
+| 授权提前撤销（**签发后**撤销） | 在线查询即时可见并拒绝 | 不感知，凭证到期前仍可用 |
+| 授权在**签发前**撤销 | 在线查询拒绝 | 签发入口即拒绝，根本不产生凭证（非"签发后离线仍可用"情形） |
+| 过期 | 在线拒绝 | 签发前已过期则签发入口拒绝；已签发凭证本地按 `expires_at` 拒绝 |
 | 重放 / 并发 | 靠共用本地消费存储 | 靠共用本地消费存储（同机制） |
 | 防重放来源 | 本地原子消费状态 | 本地原子消费状态（**不是签名**） |
 
 **关键结论**：唯一可归因于"本地签名凭证"的增量是——**授权服务不可达时仍可独立验证并执行**（实测 B2 REJECTED / C EXECUTED）。其代价是**撤销可见性下降**（实测撤销后 B2 REJECTED / C 仍 EXECUTED）。这是一个**可用性 vs 撤销新鲜度的架构权衡**，不是"C 全面更安全"。
+
+**撤销时序区分（重要）**：本报告的撤销架构权衡实验只针对**签发后撤销**——凭证在授权 `ACTIVE` 时合法签发，之后撤销，离线 C 无法即时感知。`CredentialIssuanceError` 签发入口约束处理的是另一种情形：**签发前已撤销/已过期**的授权不再能被签成有效凭证（reason `REVOKED` / `EXPIRED`）。二者不构成矛盾，也不改变 H1 的核心权衡结论。
 
 另需记录的限制：B2 在线查询与 Executor 本地消费之间存在时间窗——查询通过后、消费前发生的撤销，Executor 不一定能及时发现；**不声称撤销与副作用之间有全局原子性**。
 
@@ -141,7 +145,8 @@ Authorization Service 与 Executor 分属两个信任域：**B2 的 Executor 在
 - 两组动作绑定字段与摘要算法一致；篡改四类身份字段两组均拒。
 - C 信任锚仅在预置公钥集合；四类信任锚错误均拒。
 - 两组共用消费存储；顺序/并发/崩溃回滚下最多一次副作用。
-- B2 不可达 fail closed；C 不可达仍可验签；撤销后 B2 拒、C 仍执行。
+- B2 不可达 fail closed；C 不可达仍可验签；签发后撤销 B2 拒、C 仍执行。
+- 签发入口约束：签发前 REVOKED/EXPIRED 的授权均被 `CredentialIssuanceError` 拒绝，不产生可验签凭证（实测 4 项专项测试）。
 
 **未验证假设**
 - 真实 MCP Host / 第三方工具服务上的同等行为（本实验用受控 Sink）。

@@ -30,6 +30,7 @@ from h1_authorization_service import (  # noqa: E402
     AuthorizationService,
     AuthServiceTLSServer,
     B2OnlineVerifier,
+    CredentialIssuanceError,
 )
 from h1_executor import Executor, VerificationError  # noqa: E402
 from h1_protocol import H1ProtocolError, compute_action_digest  # noqa: E402
@@ -164,13 +165,17 @@ class TestH1LegalAndTamper(H1Fixture):
                    lambda: self.c_exec(request=bad, credential=cred_c)):
             self.assert_denied(fn, "EXECUTOR_TARGET_MISMATCH")
 
-    def test_06_expired_rejected_both(self):
+    def test_06_expired_authorization_issuance_refused(self):
+        # 新语义：授权在签发前已过期 -> issue_credential 拒绝（签发入口约束）。
+        # B2 在线查询仍按服务端当前状态返回 EXPIRED（与签发路径无关）。
         req = fresh_request()
         now = time.time()
-        jti_b2, _ = self.authorize(request=req, ttl=-1.0, now=now)
-        jti_c, cred_c = self.authorize(request=req, ttl=-1.0, now=now)
-        self.assert_denied(lambda: self.b2_exec(request=req, jti=jti_b2), "EXPIRED")
-        self.assert_denied(lambda: self.c_exec(request=req, credential=cred_c), "C_EXPIRED")
+        jti = f"jti-{uuid.uuid4().hex}"
+        self.auth.confirm(request=req, jti=jti, ttl_seconds=-1.0, now=now)
+        with self.assertRaises(CredentialIssuanceError) as ctx:
+            self.auth.issue_credential(jti)
+        self.assertEqual(ctx.exception.reason, "EXPIRED")
+        self.assert_denied(lambda: self.b2_exec(request=req, jti=jti), "EXPIRED")
 
     def test_08_c_credential_signature_tamper_rejected(self):
         req = fresh_request()
@@ -279,6 +284,52 @@ class TestH1Consumption(H1Fixture):
         jti, cred = self.authorize(request=req)
         self.assertEqual(self.b2_exec(request=req, jti=jti)["outcome"], "EXECUTED")
         self.assertEqual(self.c_exec(request=req, credential=cred)["outcome"], "DEDUP_HIT")
+        self.assertEqual(self.sink.effect_count(), 1)
+
+
+class TestH1IssuanceGuard(H1Fixture):
+    """签发入口约束（H1 验收修复）：签发前撤销/过期拒签；签发后撤销语义不变。"""
+
+    def test_20_active_issuance_then_c_executes(self):
+        # 正常 ACTIVE 授权仍能签发，并可由 C 预置公钥验签执行。
+        req = fresh_request()
+        jti = f"jti-{uuid.uuid4().hex}"
+        self.auth.confirm(request=req, jti=jti, ttl_seconds=300.0)
+        cred = self.auth.issue_credential(jti)  # 不得抛异常
+        self.assertEqual(self.c_exec(request=req, credential=cred)["outcome"], "EXECUTED")
+        self.assertEqual(self.sink.effect_count(), 1)
+
+    def test_21_revoke_before_issuance_refused(self):
+        # 撤销发生在签发之前：issue_credential 必须拒绝，无凭证可签。
+        req = fresh_request()
+        jti = f"jti-{uuid.uuid4().hex}"
+        self.auth.confirm(request=req, jti=jti, ttl_seconds=300.0)
+        self.auth.revoke(jti)
+        with self.assertRaises(CredentialIssuanceError) as ctx:
+            self.auth.issue_credential(jti)
+        self.assertEqual(ctx.exception.reason, "REVOKED")
+
+    def test_22_expired_before_issuance_refused(self):
+        # 授权在签发时点已过期：issue_credential 必须拒绝。
+        req = fresh_request()
+        now = time.time()
+        jti = f"jti-{uuid.uuid4().hex}"
+        self.auth.confirm(request=req, jti=jti, ttl_seconds=-1.0, now=now)
+        with self.assertRaises(CredentialIssuanceError) as ctx:
+            self.auth.issue_credential(jti, now=now)
+        self.assertEqual(ctx.exception.reason, "EXPIRED")
+
+    def test_23_revoke_after_issuance_keeps_h1_tradeoff(self):
+        # 已签发凭证之后再撤销：保持 H1 原有架构权衡——B2 在线拒、C 离线仍执行。
+        # 该测试锁定"签发后撤销"语义，不得因修复签发入口而改变。
+        req = fresh_request()
+        jti_b2, _ = self.authorize(request=req)
+        jti_c, cred_c = self.authorize(request=req)
+        self.auth.revoke(jti_b2)
+        self.auth.revoke(jti_c)
+        self.assert_denied(lambda: self.b2_exec(request=req, jti=jti_b2), "REVOKED")
+        out = self.c_exec(request=req, credential=cred_c)
+        self.assertEqual(out["outcome"], "EXECUTED")
         self.assertEqual(self.sink.effect_count(), 1)
 
 
