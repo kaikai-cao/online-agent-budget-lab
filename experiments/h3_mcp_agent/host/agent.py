@@ -23,7 +23,12 @@ import time
 from typing import Any, Callable
 
 from ..redact import redact
-from ..tool_specs import ValidationError, to_openai_tools, validate_arguments
+from ..tool_specs import (
+    ValidationError,
+    assert_tools_consistent,
+    mcp_tools_to_openai,
+    validate_arguments,
+)
 from .deepseek_client import SYSTEM_PROMPT, DeepSeekClient
 from .mcp_client import McpSession
 
@@ -72,7 +77,40 @@ class AgentHost:
         prompt: str,
         model_tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        tools = model_tools if model_tools is not None else to_openai_tools()
+        if model_tools is None:
+            # Dynamic discovery: the model sees the tools the real MCP Server
+            # actually advertises via tools/list, not a hard-coded local copy.
+            # Any drift from the frozen local spec fails closed BEFORE the
+            # model is called, so no tool definition is trusted implicitly.
+            mcp_tools = await session.list_tools()
+            assert_tools_consistent(mcp_tools)
+            tools = mcp_tools_to_openai(mcp_tools)
+            self._emit(
+                {
+                    "event": "tools_discovered",
+                    "task_id": task_id,
+                    "discovered_tools": [t["name"] for t in mcp_tools],
+                    "discovery_source": "mcp_tools_list",
+                    "discovery_consistent": True,
+                    "timestamp": time.time(),
+                }
+            )
+        else:
+            # Explicit tools are only for offline/scripted tests; the real run
+            # path never supplies them.
+            tools = model_tools
+            self._emit(
+                {
+                    "event": "tools_discovered",
+                    "task_id": task_id,
+                    "discovered_tools": [
+                        (t.get("function") or {}).get("name") for t in model_tools
+                    ],
+                    "discovery_source": "caller_supplied",
+                    "discovery_consistent": None,
+                    "timestamp": time.time(),
+                }
+            )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
@@ -161,8 +199,14 @@ class AgentHost:
                     content = json.dumps(mcp_response, ensure_ascii=False)
 
                 effect_id = None
+                mcp_received = False
                 if isinstance(mcp_response, dict):
                     effect_id = mcp_response.get("effect_id")
+                    # Server-side receipt: stamped by the MCP Server process
+                    # only after it logged the call in tool_events. It is NEVER
+                    # inferred from host_decision=ALLOW (Host may allow a call
+                    # that fails before reaching the Server).
+                    mcp_received = mcp_response.get("server_received") is True
 
                 event = {
                     "event": "tool_call",
@@ -177,6 +221,7 @@ class AgentHost:
                     "mcp_response": mcp_response,
                     "effect_id": effect_id,
                     "effect_status": effect_status,
+                    "mcp_received": mcp_received,
                     "timestamp": time.time(),
                 }
                 self._emit(event)
@@ -186,6 +231,7 @@ class AgentHost:
                         "tool_name": name,
                         "host_decision": event["host_decision"],
                         "effect_status": effect_status,
+                        "mcp_received": mcp_received,
                         "effect_id": effect_id,
                     }
                 )

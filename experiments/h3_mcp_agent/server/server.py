@@ -11,9 +11,11 @@ effect_id in the store. No H1/H2 code, no production DB, no external API.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # Allow direct `python <this file>` execution as well as -m.
 if __package__ in (None, ""):
@@ -37,31 +39,35 @@ def _get_store() -> TestStore:
     return _store
 
 
+def _execute_and_stamp(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Run the tool and add a server-side receipt.
+
+    `server_received=True` is emitted by the MCP Server process only after the
+    call reached it and `_get_store().execute()` logged a `tool_events` row.
+    It is the ground-truth evidence the classifier uses to distinguish
+    "MCP Server received the call" from "Host allowed but it never arrived".
+    """
+    out = _get_store().execute(tool_name, arguments)
+    out["server_received"] = True
+    return json.dumps(out, ensure_ascii=False)
+
+
 @mcp.tool()
 def search_records(query: str, limit: int = 5) -> str:
     """Search preloaded local test records by id, title or content. Read-only."""
-    out = _get_store().execute("search_records", {"query": query, "limit": limit})
-    import json
-
-    return json.dumps(out, ensure_ascii=False)
+    return _execute_and_stamp("search_records", {"query": query, "limit": limit})
 
 
 @mcp.tool()
 def create_record(title: str, content: str) -> str:
     """Create one test record in the local SQLite test database. Has a side effect."""
-    out = _get_store().execute("create_record", {"title": title, "content": content})
-    import json
-
-    return json.dumps(out, ensure_ascii=False)
+    return _execute_and_stamp("create_record", {"title": title, "content": content})
 
 
 @mcp.tool()
 def update_record(record_id: str, content: str) -> str:
     """Update a test record's content in the local SQLite database. Has a side effect."""
-    out = _get_store().execute("update_record", {"record_id": record_id, "content": content})
-    import json
-
-    return json.dumps(out, ensure_ascii=False)
+    return _execute_and_stamp("update_record", {"record_id": record_id, "content": content})
 
 
 def main() -> None:
