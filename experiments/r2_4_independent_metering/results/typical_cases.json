@@ -1,0 +1,399 @@
+{
+  "T2": {
+    "absent": {
+      "A": [
+        "MISSING_USAGE_EVENT"
+      ]
+    },
+    "attack": "service_under_reports_A",
+    "execution_events": [
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T2-t00:A:op1:att0",
+        "operation_id": "op1",
+        "registered_at": "t-001",
+        "request_digest": "sha256:req-op1-att0",
+        "run_id": "run-T2-t00",
+        "sequence_no": 1,
+        "service_id": "A",
+        "status": "FINALIZED",
+        "witness_signature": "BfXjZ/lMwSaX4aY+VmamMrEQVwGJbe/IatEf3T4in5sZtygFdN3pi5YHT//ROrgKd0DOoKWXuIxRm58ifpJ0Cw=="
+      },
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T2-t00:B:op2:att0",
+        "operation_id": "op2",
+        "registered_at": "t-003",
+        "request_digest": "sha256:req-op2-att0",
+        "run_id": "run-T2-t00",
+        "sequence_no": 2,
+        "service_id": "B",
+        "status": "FINALIZED",
+        "witness_signature": "bjFyKtf/FhE45pxnNX/l0N095HGJ59A1pxPHp6bbj9EwCOl5menK5mUneWWxA6Uj/21DmpT6FRzj/j3RjtKDCw=="
+      }
+    ],
+    "expected": {
+      "A": [],
+      "B": [
+        "MISSING_USAGE_EVENT"
+      ],
+      "C": [
+        "MISSING_USAGE_EVENT"
+      ]
+    },
+    "key_fingerprints": {
+      "observer": "sha256:487a48ea5b0f60d885439af2208a7c83ca5713c70d9a40e5d4434a6ec2453b77",
+      "service_A": "sha256:e57d7ac8180dc72e9b6b1e3cbdde3efc2a79e754778083b5ddae983b86a5cd01",
+      "service_B": "sha256:a0e3fca6bc39a495d6862ca20986db05b8ca8ca80508596c9aca21468bba036f",
+      "witness": "sha256:7c239f503f23b97d98d70e530f49bfcf30fa2a280ab6500318d4601615d4e429"
+    },
+    "observations": [
+      {
+        "event_id": "run-T2-t00:A:op1:att0",
+        "observed_usage": 300,
+        "observer_id": "observer-01",
+        "signature": "K7ycnAvmD7vDy8lNaF//MPEt+imZ5O9F7wSLiXeWCUfUGXA0OIvJhLRan6hhweA0pV676ftvsHx/AeBxMc2mDA==",
+        "unit": "unit"
+      },
+      {
+        "event_id": "run-T2-t00:B:op2:att0",
+        "observed_usage": 200,
+        "observer_id": "observer-01",
+        "signature": "A//sBTOnpWcLy+byrv//hNLbets0Dj/rLFeqxet7QG/fM4Po8jmpxPhLH6Qrsh68ukQGOi1tsx1Jv/K3FAfTCw==",
+        "unit": "unit"
+      }
+    ],
+    "run_id": "run-T2-t00",
+    "scenario": "T2",
+    "schemes": {
+      "A": {
+        "blocking_verdicts": [],
+        "charged_total": 300,
+        "settleable": true,
+        "verdict_names": [],
+        "verdicts": []
+      },
+      "B": {
+        "blocking_verdicts": [
+          "MISSING_USAGE_EVENT"
+        ],
+        "charged_total": 300,
+        "settleable": false,
+        "verdict_names": [
+          "MISSING_USAGE_EVENT"
+        ],
+        "verdicts": [
+          {
+            "detail": {
+              "sequence_no": 2,
+              "witness_status": "FINALIZED"
+            },
+            "event_id": "run-T2-t00:B:op2:att0",
+            "reason": "witness registered event has no accepted usage record",
+            "scheme": "B",
+            "verdict": "MISSING_USAGE_EVENT"
+          }
+        ]
+      },
+      "C": {
+        "blocking_verdicts": [
+          "MISSING_USAGE_EVENT",
+          "UNKNOWN_EVENT"
+        ],
+        "charged_total": 300,
+        "settleable": false,
+        "verdict_names": [
+          "MISSING_USAGE_EVENT",
+          "UNKNOWN_EVENT"
+        ],
+        "verdicts": [
+          {
+            "detail": {
+              "sequence_no": 2,
+              "witness_status": "FINALIZED"
+            },
+            "event_id": "run-T2-t00:B:op2:att0",
+            "reason": "witness registered event has no accepted usage record",
+            "scheme": "C",
+            "verdict": "MISSING_USAGE_EVENT"
+          },
+          {
+            "detail": {},
+            "event_id": "run-T2-t00:B:op2:att0",
+            "reason": "observation exists but no accepted usage event",
+            "scheme": "C",
+            "verdict": "UNKNOWN_EVENT"
+          }
+        ]
+      }
+    },
+    "seed": 20261119,
+    "trial": 0,
+    "usage_events": [
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T2-t00:A:op1:att0",
+        "operation_id": "op1",
+        "run_id": "run-T2-t00",
+        "signature": "kbVwUG0wJYsXyaHWenrlVsFnEj84r8rJQHPxXt3OhYdVe54r1DfwChfTyPUSmPn6Jyjs7S6Qt2HBjVjTkxZtCQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 300
+      }
+    ]
+  },
+  "T6": {
+    "absent": {
+      "A": [
+        "DUPLICATE_USAGE_EVENT",
+        "INCOMPLETE_EXECUTION_STATUS"
+      ],
+      "B": [
+        "DUPLICATE_USAGE_EVENT",
+        "INCOMPLETE_EXECUTION_STATUS"
+      ],
+      "C": [
+        "DUPLICATE_USAGE_EVENT",
+        "INCOMPLETE_EXECUTION_STATUS"
+      ]
+    },
+    "attack": "two_distinct_attempts_not_deduped",
+    "execution_events": [
+      {
+        "attempt_id": "att1",
+        "event_id": "run-T6-t00:A:op1:att1",
+        "operation_id": "op1",
+        "registered_at": "t-001",
+        "request_digest": "sha256:req-op1-att1",
+        "run_id": "run-T6-t00",
+        "sequence_no": 1,
+        "service_id": "A",
+        "status": "FINALIZED",
+        "witness_signature": "IVz5SMCOCcOM9UKS990n/13vi+/KoUpJ4HbXeORA/lWQlMqYE1eXRzM6nURK/QpUU5MkJ8qUd8nX0/sKkTVaAg=="
+      },
+      {
+        "attempt_id": "att2",
+        "event_id": "run-T6-t00:A:op1:att2",
+        "operation_id": "op1",
+        "registered_at": "t-002",
+        "request_digest": "sha256:req-op1-att2",
+        "run_id": "run-T6-t00",
+        "sequence_no": 2,
+        "service_id": "A",
+        "status": "FINALIZED",
+        "witness_signature": "I3fF6NQHFLQsn5qAR+uePRdOFF945D60F6FtPxvNqV6Z5NjnM4Dy3zj+PomvBrhIHD+zE11TGnbOqq6KRN/BBw=="
+      }
+    ],
+    "expected": {
+      "A": [],
+      "B": [],
+      "C": []
+    },
+    "key_fingerprints": {
+      "observer": "sha256:487a48ea5b0f60d885439af2208a7c83ca5713c70d9a40e5d4434a6ec2453b77",
+      "service_A": "sha256:e57d7ac8180dc72e9b6b1e3cbdde3efc2a79e754778083b5ddae983b86a5cd01",
+      "service_B": "sha256:a0e3fca6bc39a495d6862ca20986db05b8ca8ca80508596c9aca21468bba036f",
+      "witness": "sha256:7c239f503f23b97d98d70e530f49bfcf30fa2a280ab6500318d4601615d4e429"
+    },
+    "observations": [
+      {
+        "event_id": "run-T6-t00:A:op1:att1",
+        "observed_usage": 30,
+        "observer_id": "observer-01",
+        "signature": "U5FjZ6Yn0PM9hCR2brXjlCV36oEbYkYCBOJ+rQ906BFA7Za6RNxf6cJpMWqc2MnaATicE6DLerjzg+idGBApBg==",
+        "unit": "unit"
+      },
+      {
+        "event_id": "run-T6-t00:A:op1:att2",
+        "observed_usage": 20,
+        "observer_id": "observer-01",
+        "signature": "qhv3iQFu5FCHcgrAdjSit0Ok/ruGjcPWqjudGpeyZYAk0rYg5z8yXfJ5WIkzIIJchYeq+bzNZpchfjI+jXpLDg==",
+        "unit": "unit"
+      }
+    ],
+    "run_id": "run-T6-t00",
+    "scenario": "T6",
+    "schemes": {
+      "A": {
+        "blocking_verdicts": [],
+        "charged_total": 50,
+        "settleable": true,
+        "verdict_names": [],
+        "verdicts": []
+      },
+      "B": {
+        "blocking_verdicts": [],
+        "charged_total": 50,
+        "settleable": true,
+        "verdict_names": [],
+        "verdicts": []
+      },
+      "C": {
+        "blocking_verdicts": [],
+        "charged_total": 50,
+        "settleable": true,
+        "verdict_names": [],
+        "verdicts": []
+      }
+    },
+    "seed": 20261119,
+    "trial": 0,
+    "usage_events": [
+      {
+        "attempt_id": "att1",
+        "event_id": "run-T6-t00:A:op1:att1",
+        "operation_id": "op1",
+        "run_id": "run-T6-t00",
+        "signature": "LurhZNXDXIu2mxGixymkMsLJlHmtVJS/qjV1Eatp5SAX3UGQRFOS9mh4mCC6P9Fz1CopCLjLRrB4rIWG03AJBw==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 30
+      },
+      {
+        "attempt_id": "att2",
+        "event_id": "run-T6-t00:A:op1:att2",
+        "operation_id": "op1",
+        "run_id": "run-T6-t00",
+        "signature": "r+qyEclg8kku7md4287q9+4GmnZN+f5KXjyDdb+k1dQYzVlADJj1vg0AL20obEXkrleT3tP13tMDZhxDzI6EAQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 20
+      }
+    ]
+  },
+  "T7": {
+    "absent": {
+      "A": [
+        "USAGE_MISMATCH"
+      ],
+      "B": [
+        "USAGE_MISMATCH"
+      ]
+    },
+    "attack": "service_false_metering_actual_250_reported_100",
+    "execution_events": [
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T7-t00:A:op1:att0",
+        "operation_id": "op1",
+        "registered_at": "t-001",
+        "request_digest": "sha256:req-op1-att0",
+        "run_id": "run-T7-t00",
+        "sequence_no": 1,
+        "service_id": "A",
+        "status": "FINALIZED",
+        "witness_signature": "e2AZS2Rzumf/nLwwgqFAl1ySskPlSWA6E8kojHrIrrAOia1H3baMaVDVGVfiGiqWEolSgC/dvdAWfEw79wfVBA=="
+      },
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T7-t00:B:op2:att0",
+        "operation_id": "op2",
+        "registered_at": "t-002",
+        "request_digest": "sha256:req-op2-att0",
+        "run_id": "run-T7-t00",
+        "sequence_no": 2,
+        "service_id": "B",
+        "status": "FINALIZED",
+        "witness_signature": "oqAb4CWI6OzRGTWNXy/nsty92JiccYR6+41dh5MMPop5Yt9GPeR8+zMU1Hj0fYZxN3mZjzuy8k6va4YcakarBQ=="
+      }
+    ],
+    "expected": {
+      "A": [],
+      "B": [],
+      "C": [
+        "USAGE_MISMATCH"
+      ]
+    },
+    "key_fingerprints": {
+      "observer": "sha256:487a48ea5b0f60d885439af2208a7c83ca5713c70d9a40e5d4434a6ec2453b77",
+      "service_A": "sha256:e57d7ac8180dc72e9b6b1e3cbdde3efc2a79e754778083b5ddae983b86a5cd01",
+      "service_B": "sha256:a0e3fca6bc39a495d6862ca20986db05b8ca8ca80508596c9aca21468bba036f",
+      "witness": "sha256:7c239f503f23b97d98d70e530f49bfcf30fa2a280ab6500318d4601615d4e429"
+    },
+    "observations": [
+      {
+        "event_id": "run-T7-t00:A:op1:att0",
+        "observed_usage": 250,
+        "observer_id": "observer-01",
+        "signature": "3vXOjImQB6/lnjbfUagUs8LCBV3xJ+QPUN2U/9Q4+7Wdr9TP47DrKj1yVq8lDp4HP6ouRPp14x6A0G7aEIPZAQ==",
+        "unit": "unit"
+      },
+      {
+        "event_id": "run-T7-t00:B:op2:att0",
+        "observed_usage": 200,
+        "observer_id": "observer-01",
+        "signature": "HRfK56SDTsXEJ+/XMdK1cZ7jlDn1x1LBjWWLii4d1IAh0bwWNfww3mIUgbslUiZjrK9uD/kWES5DoxZdRk+pCw==",
+        "unit": "unit"
+      }
+    ],
+    "run_id": "run-T7-t00",
+    "scenario": "T7",
+    "schemes": {
+      "A": {
+        "blocking_verdicts": [],
+        "charged_total": 300,
+        "settleable": true,
+        "verdict_names": [],
+        "verdicts": []
+      },
+      "B": {
+        "blocking_verdicts": [],
+        "charged_total": 300,
+        "settleable": true,
+        "verdict_names": [],
+        "verdicts": []
+      },
+      "C": {
+        "blocking_verdicts": [
+          "USAGE_MISMATCH"
+        ],
+        "charged_total": 200,
+        "settleable": false,
+        "verdict_names": [
+          "USAGE_MISMATCH"
+        ],
+        "verdicts": [
+          {
+            "detail": {
+              "claimed_usage": 100,
+              "observed_usage": 250
+            },
+            "event_id": "run-T7-t00:A:op1:att0",
+            "reason": "service-declared usage != independent observed usage",
+            "scheme": "C",
+            "verdict": "USAGE_MISMATCH"
+          }
+        ]
+      }
+    },
+    "seed": 20261119,
+    "trial": 0,
+    "usage_events": [
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T7-t00:A:op1:att0",
+        "operation_id": "op1",
+        "run_id": "run-T7-t00",
+        "signature": "N3UZzpvS2DpBtS0P1NKEyexM+TsxzAkPvw5lQ8Rgs/0P4DC/VIcEj7/Zy5fHMtCXnpw5h6dWQWJXSsV/fqAMBQ==",
+        "source_id": "A",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 100
+      },
+      {
+        "attempt_id": "att0",
+        "event_id": "run-T7-t00:B:op2:att0",
+        "operation_id": "op2",
+        "run_id": "run-T7-t00",
+        "signature": "aPKxRXHBDkH+SuOnKFsXBPXE3NUu2lbjNyevMlFtSSmR8fOWRXZe7/dIRoKi13ZobI0Mf7hdW6QGdzHAJJvLCQ==",
+        "source_id": "B",
+        "status": "MEASURED",
+        "unit": "unit",
+        "usage": 200
+      }
+    ]
+  }
+}

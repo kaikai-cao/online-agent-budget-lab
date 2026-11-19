@@ -1,0 +1,372 @@
+{
+  "capability_matrix": {
+    "T1": {
+      "A": {
+        "absent_verdicts": [
+          "MISSING_USAGE_EVENT",
+          "DUPLICATE_USAGE_EVENT",
+          "INVALID_SIGNATURE",
+          "USAGE_MISMATCH",
+          "INCOMPLETE_EXECUTION_STATUS",
+          "UNKNOWN_EVENT",
+          "INVALID_EVENT_LINKAGE"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "B": {
+        "absent_verdicts": [
+          "MISSING_USAGE_EVENT",
+          "DUPLICATE_USAGE_EVENT",
+          "INVALID_SIGNATURE",
+          "USAGE_MISMATCH",
+          "INCOMPLETE_EXECUTION_STATUS",
+          "UNKNOWN_EVENT",
+          "INVALID_EVENT_LINKAGE"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "C": {
+        "absent_verdicts": [
+          "MISSING_USAGE_EVENT",
+          "DUPLICATE_USAGE_EVENT",
+          "INVALID_SIGNATURE",
+          "USAGE_MISMATCH",
+          "INCOMPLETE_EXECUTION_STATUS",
+          "UNKNOWN_EVENT",
+          "INVALID_EVENT_LINKAGE"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      }
+    },
+    "T2": {
+      "A": {
+        "absent_verdicts": [
+          "MISSING_USAGE_EVENT"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "B": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "MISSING_USAGE_EVENT"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "C": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "MISSING_USAGE_EVENT"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      }
+    },
+    "T3": {
+      "A": {
+        "absent_verdicts": [
+          "MISSING_USAGE_EVENT"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "B": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "MISSING_USAGE_EVENT"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "C": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "MISSING_USAGE_EVENT"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      }
+    },
+    "T4": {
+      "A": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "INVALID_SIGNATURE"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "B": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "INVALID_SIGNATURE"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "C": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "INVALID_SIGNATURE"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      }
+    },
+    "T5": {
+      "A": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "DUPLICATE_USAGE_EVENT"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "B": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "DUPLICATE_USAGE_EVENT"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "C": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "DUPLICATE_USAGE_EVENT"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      }
+    },
+    "T6": {
+      "A": {
+        "absent_verdicts": [
+          "DUPLICATE_USAGE_EVENT",
+          "INCOMPLETE_EXECUTION_STATUS"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "B": {
+        "absent_verdicts": [
+          "DUPLICATE_USAGE_EVENT",
+          "INCOMPLETE_EXECUTION_STATUS"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "C": {
+        "absent_verdicts": [
+          "DUPLICATE_USAGE_EVENT",
+          "INCOMPLETE_EXECUTION_STATUS"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      }
+    },
+    "T7": {
+      "A": {
+        "absent_verdicts": [
+          "USAGE_MISMATCH"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "B": {
+        "absent_verdicts": [
+          "USAGE_MISMATCH"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "C": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "USAGE_MISMATCH"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      }
+    },
+    "T8": {
+      "A": {
+        "absent_verdicts": [
+          "INCOMPLETE_EXECUTION_STATUS"
+        ],
+        "detection_rate": null,
+        "expected_correct": 10,
+        "expected_verdicts": [],
+        "false_negative_rate": null,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "B": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "INCOMPLETE_EXECUTION_STATUS"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      },
+      "C": {
+        "absent_verdicts": [],
+        "detection_rate": 1.0,
+        "expected_correct": 10,
+        "expected_verdicts": [
+          "INCOMPLETE_EXECUTION_STATUS"
+        ],
+        "false_negative_rate": 0.0,
+        "false_positive_count": 0,
+        "false_positive_rate": 0.0,
+        "trials": 10
+      }
+    }
+  },
+  "experiment": "r2_4_phase1_independent_metering",
+  "flagship_control": {
+    "T7_false_metering_actual_250_reported_100": {
+      "note": "Signature authenticates origin+integrity; only independent observation can cross-check a numeric value. B (witness registers intent) alone does NOT prove metering truth.",
+      "scheme_A_detects": false,
+      "scheme_B_detects": false,
+      "scheme_C_detects": true
+    }
+  },
+  "generated_utc": "2026-11-19T11:37:04.779515+00:00",
+  "scenarios": [
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T7",
+    "T8"
+  ],
+  "schemes": {
+    "A": "ordinary signed metering",
+    "B": "A + independent event witness",
+    "C": "B + independent metering observation"
+  },
+  "seed_base": 20261119,
+  "total_records": 80,
+  "trials_per_scenario": 10,
+  "trust_assumptions": {
+    "observer": "simulated trusted observation point; own DB + own key; NOT real TEE",
+    "service": "untrusted; controls submitted rows and signed values",
+    "witness": "honest; own DB + own Ed25519 key; registers intent not truth"
+  },
+  "verdict_taxonomy": [
+    "ACCEPTED",
+    "MISSING_USAGE_EVENT",
+    "DUPLICATE_USAGE_EVENT",
+    "INVALID_SIGNATURE",
+    "USAGE_MISMATCH",
+    "INCOMPLETE_EXECUTION_STATUS",
+    "UNKNOWN_EVENT",
+    "INVALID_EVENT_LINKAGE"
+  ]
+}
