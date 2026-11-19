@@ -156,8 +156,14 @@ class SinkSemantics(unittest.TestCase):
         self._tmp.cleanup()
 
     def _dispatch(self, key=None, args=None, enabled=True, rollback_once=False, op="op-1"):
+        # Always derive the key from the operation actually under test unless the
+        # caller supplies an explicit key.  Otherwise a non-default ``op`` (e.g.
+        # the concurrency check's "concurrent") would silently reuse the setUp
+        # key derived for "op-1", violating the declared derivation rule.
+        if key is None:
+            key = sink_idempotency_key(executor_id="exec-e23", operation_id=op)
         return self.sink.dispatch(
-            idempotency_key=key or self.key, operation_id=op, executor_id="exec-e23",
+            idempotency_key=key, operation_id=op, executor_id="exec-e23",
             tool_name="local.echo", tool_schema_hash="sha256:" + "d" * 64,
             arguments=args or ARGS_A, result=RESULT, invoice_id="INV-E23-SYSTEM",
             enabled=enabled, rollback_once=rollback_once,
