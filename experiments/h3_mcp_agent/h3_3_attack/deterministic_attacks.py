@@ -209,6 +209,12 @@ async def execute_plan(plan: Plan, workdir: Path) -> AttackRecord:
             sd.update(_outcome_fields(step.outcome))
             sd["jti"] = step.outcome.get("jti")
             sd["dispatch_permitted"] = step.dispatch_permitted
+            # Per-step MCP evidence (archive revision 2026-11-19). These let the
+            # PRIMARY step's own call/receipt/effect be distinguished from a
+            # preceding legitimate setup step (A4/A6 `first`).
+            sd["mcp_called"] = False
+            sd["mcp_received"] = False
+            sd["effect_delta"] = 0
             if step.dispatch_permitted:
                 if step.force_mcp_failure:
                     rt.dispatcher.record_dispatch_outcome(
@@ -219,17 +225,21 @@ async def execute_plan(plan: Plan, workdir: Path) -> AttackRecord:
                     sd["mcp_status"] = mcp_status
                 else:
                     mcp_called = True
+                    sd["mcp_called"] = True
                     try:
                         resp = await _real_dispatch(
                             mcp_db, step.dispatch_tool or "", step.dispatch_args or {}
                         )
-                        mcp_received = mcp_received or (resp.get("server_received") is True)
+                        step_received = resp.get("server_received") is True
+                        mcp_received = mcp_received or step_received
+                        sd["mcp_received"] = step_received
                         mcp_status = resp.get("status") or str(resp.get("result", {}).get("reason") or "")
                         sd["mcp_status"] = mcp_status
                         sd["effect_id"] = resp.get("effect_id")
                         if resp.get("has_effect") is True:
                             step.produced_effect = True
                             sd["produced_effect"] = True
+                            sd["effect_delta"] = 1
                     except Exception as exc:  # noqa: BLE001 - honest recording
                         mcp_status = "MCP_ERROR:" + type(exc).__name__
                         sd["mcp_status"] = mcp_status
@@ -250,6 +260,18 @@ async def execute_plan(plan: Plan, workdir: Path) -> AttackRecord:
     reused = len(plan.steps) > 1 and all(
         s.outcome.get("jti") == primary.outcome.get("jti") for s in plan.steps
     )
+    # PRIMARY-step-only evidence (archive revision 2026-11-19). Top-level
+    # mcp_called/mcp_received/effect_delta are trial-level and may include the
+    # first legitimate setup step (notably A4 replay); these fields describe the
+    # primary attack step alone so the archive cannot be misread.
+    primary_sd = next(
+        (s for s in step_details if s.get("label") == plan.primary_label), {}
+    )
+    primary_mcp_called = bool(primary_sd.get("mcp_called"))
+    primary_mcp_received = bool(primary_sd.get("mcp_received"))
+    primary_effect_delta = int(bool(primary_sd.get("produced_effect")))
+    mcp_readonly_call_count = 0  # Layer 2 attacks never issue read-only MCP calls.
+    mcp_readonly_received = False
 
     return AttackRecord(
         run_id=f"h33_{plan.group}_{plan.attack_id}_{uuid.uuid4().hex[:8]}",
@@ -264,6 +286,11 @@ async def execute_plan(plan: Plan, workdir: Path) -> AttackRecord:
         mcp_called=mcp_called, mcp_received=mcp_received, mcp_server_status=mcp_status,
         effect_before=effect_before, effect_after=effect_after,
         effect_delta=effect_after - effect_before,
+        mcp_readonly_call_count=mcp_readonly_call_count,
+        mcp_readonly_received=mcp_readonly_received,
+        primary_mcp_called=primary_mcp_called,
+        primary_mcp_received=primary_mcp_received,
+        primary_effect_delta=primary_effect_delta,
         audit_tool_events=audit_events, audit_dispatch_events=dispatch_events,
         outcome=outcome, reject_stage=stage,
         detail={**plan.detail, "steps": step_details, "expected_outcome": plan.expect_outcome},

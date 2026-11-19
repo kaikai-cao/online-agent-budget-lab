@@ -24,6 +24,20 @@ GROUND TRUTH DISCIPLINE:
   - H3.x has no E1/E2-style signed Receipt/Journal component. We do NOT
     fabricate one. `audit_*` fields record the ACTUAL artifacts present:
     MCP tool_events and DispatchConsumptionStore.dispatch_events.
+
+FIELD SCOPE (archive revision, 2026-11-19):
+  - `mcp_called` / `mcp_received` are TRIAL-level: True iff a real MCP
+    tools/call happened / a Server stamp was observed in the trial. A1's
+    100 read-only `search_records` calls ARE real MCP calls, so these are True
+    there; they must NOT be read as "an attack write reached MCP".
+  - `mcp_readonly_call_count` / `mcp_readonly_received` isolate read-only MCP
+    traffic (the A1 injection-delivery calls).
+  - `primary_*` fields describe ONLY the `primary` attack step, NOT a preceding
+    legitimate setup step, and isolate the attack/write call: in A1 there is no
+    write call, so `primary_mcp_called` is False even though `mcp_called` is True.
+    Top-level `effect_delta` is trial-level and may include a setup effect (e.g.
+    A4 replay); `primary_effect_delta` is the attack step's own effect and is
+    the field that decides the verdict.
 """
 
 from __future__ import annotations
@@ -74,6 +88,10 @@ RECORD_FIELDS = [
     "mcp_called", "mcp_received", "mcp_server_status", "effect_before", "effect_after",
     "effect_delta", "receipt_status", "audit_tool_events", "audit_dispatch_events",
     "outcome", "reject_stage", "detail",
+    # Archive revision (2026-11-19): explicit scope fields. Appended at the end
+    # so existing columns keep their positions for raw-data compatibility.
+    "mcp_readonly_call_count", "mcp_readonly_received", "primary_mcp_called",
+    "primary_mcp_received", "primary_effect_delta",
 ]
 
 
@@ -111,6 +129,17 @@ class AttackRecord:
     outcome: str = ""
     reject_stage: str = ""
     detail: dict[str, Any] = field(default_factory=dict)
+    # Archive revision (2026-11-19). Defaults keep pre-revision rows readable.
+    # Number of read-only MCP tools/calls observed in this trial (A1 search).
+    mcp_readonly_call_count: int = 0
+    # Read-only MCP calls got a Server `server_received` stamp.
+    mcp_readonly_received: bool = False
+    # PRIMARY attack step's own MCP call / receipt / effect. Distinct from the
+    # trial-level mcp_called / mcp_received / effect_delta, which may include a
+    # preceding legitimate setup step (notably A4 same-jti replay).
+    primary_mcp_called: bool = False
+    primary_mcp_received: bool = False
+    primary_effect_delta: int = 0
 
     def finalize(self) -> "AttackRecord":
         self.effect_delta = self.effect_after - self.effect_before
