@@ -76,6 +76,10 @@ class RestoredState:
     cached_digest: str
     bootstrap_mode: str
     last_refresh_local: float
+    # H2.1-R2: the HWM actually established at first bootstrap (protocol §5.3
+    # bootstrap_snapshot_version). Persisted in meta at bootstrap time, never
+    # rewritten by refreshes; None only for legacy rows without the key.
+    bootstrap_version: int | None = None
 
 
 class SnapshotStateStore:
@@ -153,7 +157,22 @@ class SnapshotStateStore:
         except (sqlite3.Error, OSError, ValueError, TypeError):
             return STATE_S2_CORRUPT
 
-    def _validate_row(self, srow: Any) -> RestoredState | None:
+    def _meta_bootstrap_version(self, con: sqlite3.Connection) -> int | None:
+        """Read the persisted first-bootstrap HWM (R2); None if absent/legacy."""
+        row = con.execute(
+            "SELECT value FROM meta WHERE key='bootstrap_version'"
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            v = int(row[0])
+            return v if v >= 1 else None
+        except (ValueError, TypeError):
+            return None
+
+    def _validate_row(
+        self, srow: Any, *, bootstrap_version: int | None = None
+    ) -> RestoredState | None:
         """Validate structure + digest of a snapshot_state row (no time check)."""
         try:
             hwm, cached_text, digest_text, boot_mode, last_refresh = srow
@@ -169,12 +188,27 @@ class SnapshotStateStore:
             snapshot_payload(cached)  # structure check; raises ValueError
             if snapshot_digest(cached) != digest_text:
                 return None
+            # H2.1-R1: the persisted high-water version MUST equal the cached
+            # snapshot's own version. Bootstrap commits hwm = snapshot.version
+            # in one transaction, and accept_candidate advances both together,
+            # so any mismatch means the trusted persistent layer was damaged
+            # (e.g. hwm rolled back while cache+digest stayed intact). Without
+            # this check, hwm=5 with a v11 cache would let a validly-signed v8
+            # pass `version > HWM`, overwrite v11, and re-allow a jti whose
+            # revocation only existed in v11. Treat as S2 (fail closed); never
+            # derive/repair HWM from the cache (that would mask the damage).
+            cached_version = cached.get("version")
+            if isinstance(cached_version, bool) or not isinstance(cached_version, int):
+                return None
+            if hwm != cached_version:
+                return None
             return RestoredState(
                 high_water_version=hwm,
                 cached_snapshot=cached,
                 cached_digest=digest_text,
                 bootstrap_mode=str(boot_mode),
                 last_refresh_local=float(last_refresh),
+                bootstrap_version=bootstrap_version,
             )
         except (ValueError, TypeError, json.JSONDecodeError):
             return None
@@ -190,9 +224,13 @@ class SnapshotStateStore:
                 "SELECT high_water_version, cached_snapshot, cached_digest, "
                 "bootstrap_mode, last_refresh_local FROM snapshot_state WHERE id=1"
             ).fetchone()
+            boot_version = self._meta_bootstrap_version(con)
         finally:
             con.close()
-        restored = self._validate_row(srow) if srow is not None else None
+        restored = (
+            self._validate_row(srow, bootstrap_version=boot_version)
+            if srow is not None else None
+        )
         if restored is None:
             raise StateUnavailable()
         return restored
@@ -252,6 +290,12 @@ class SnapshotStateStore:
                 "INSERT OR REPLACE INTO meta(key,value) VALUES('bootstrap_mode',?)",
                 (bootstrap_mode,),
             )
+            # R2: persist the first-bootstrap HWM in the SAME transaction so the
+            # bootstrap_snapshot_version field is reproducible after restart.
+            con.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('bootstrap_version',?)",
+                (str(version),),
+            )
             con.execute(
                 "INSERT OR REPLACE INTO snapshot_state"
                 "(id,high_water_version,cached_snapshot,cached_digest,bootstrap_mode,"
@@ -268,7 +312,8 @@ class SnapshotStateStore:
         finally:
             con.close()
         return RestoredState(
-            version, dict(snapshot), digest_text, bootstrap_mode, float(now)
+            version, dict(snapshot), digest_text, bootstrap_mode, float(now),
+            bootstrap_version=version,
         )
 
     # ---- candidate acceptance (S1 only) ----
@@ -308,7 +353,11 @@ class SnapshotStateStore:
                 "SELECT high_water_version, cached_snapshot, cached_digest, "
                 "bootstrap_mode, last_refresh_local FROM snapshot_state WHERE id=1"
             ).fetchone()
-            restored = self._validate_row(srow) if srow is not None else None
+            boot_version = self._meta_bootstrap_version(con)
+            restored = (
+                self._validate_row(srow, bootstrap_version=boot_version)
+                if srow is not None else None
+            )
             if restored is None:
                 con.rollback()
                 raise StateUnavailable()
@@ -348,7 +397,8 @@ class SnapshotStateStore:
         finally:
             con.close()
         return RestoredState(
-            new_hwm, dict(snapshot), digest_text, restored.bootstrap_mode, float(now)
+            new_hwm, dict(snapshot), digest_text, restored.bootstrap_mode, float(now),
+            bootstrap_version=restored.bootstrap_version,
         )
 
     # ---- test-only corruption helpers (operate on the module's own storage) ----
@@ -368,6 +418,21 @@ class SnapshotStateStore:
         try:
             con.execute(
                 "UPDATE snapshot_state SET cached_digest='sha256:deadbeef' WHERE id=1"
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def corrupt_hwm_only_for_test(self, new_hwm: int) -> None:
+        """H2.1-R1: damage ONLY high_water_version; leave cached_snapshot and
+        cached_digest byte-for-byte intact. Simulates storage damage that the
+        digest check alone cannot detect. ``_validate_row`` must classify the
+        reopened store as S2_CORRUPT (hwm != cached_snapshot.version)."""
+        con = self._connect()
+        try:
+            con.execute(
+                "UPDATE snapshot_state SET high_water_version=? WHERE id=1",
+                (int(new_hwm),),
             )
             con.commit()
         finally:

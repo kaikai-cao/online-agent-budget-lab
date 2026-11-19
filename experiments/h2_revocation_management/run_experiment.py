@@ -129,6 +129,12 @@ def _fill_result(row: dict[str, Any], r: TrialResult) -> None:
         row["t_query"] = r.t_query
     if r.t_consume is not None:
         row["t_consume"] = r.t_consume
+    # R2: age_at_exec (injected clock, recomputable from t_exec_attempt minus
+    # t_last_refresh_local) and the bootstrap-established HWM.
+    if r.age_at_exec is not None:
+        row["age_at_exec"] = round(r.age_at_exec, 6)
+    if r.bootstrap_snapshot_version is not None:
+        row["bootstrap_snapshot_version"] = r.bootstrap_snapshot_version
     for f in ("snapshot_version_cached", "snapshot_version_candidate",
               "snapshot_valid_until", "high_water_version"):
         v = getattr(r, f)
@@ -179,12 +185,104 @@ def _finalize(row: dict[str, Any], expected: str, raw: dict[str, Any]) -> None:
     raw["row"] = dict(row)
 
 
+# R2 / protocol §6.4: five independent actual-online-cost metrics. Statistical
+# scope = C2 trials whose refresh_outcome is one of the four frozen refresh
+# classes (i.e. C2 actually ran the pre-exec refresh decision). Non-C2 groups
+# and C2 candidate-only rows (M07/M08/M09, refresh_outcome='NA') are excluded,
+# NOT counted as zero. Missing/insufficient data uses an explicit NA marker so
+# that absence is never silently reported as 0.
+REFRESH_CLASSES = {
+    "REFRESH_SUCCESS",
+    "REFRESH_FAILED_STALE_CONTINUE",
+    "REFRESH_FAILED_FAIL_CLOSED",
+    "NO_REFRESH_NEEDED",
+}
+NA_NO_APPLICABLE = "NA_NO_APPLICABLE_C2_TRIAL"
+NA_NO_WALL = "NA_NO_OBSERVATION_WALL_SECONDS"
+NA_NO_SUCCESS = "NA_LESS_THAN_TWO_REFRESH_SUCCESSES"
+
+
+def compute_refresh_metrics(
+    rows: list[dict[str, Any]],
+    observation_wall_seconds: float | None,
+) -> dict[str, Any]:
+    """Compute protocol §6.4 five metrics from ACTUAL per-trial observations.
+
+    ``actual_refresh_request_rate`` uses measured attempt counts over measured
+    wall seconds (never ``1/R``). ``successful_refresh_interval`` uses the
+    injected logical clock ``t_last_refresh_local`` (same system as ``R``).
+    """
+    applicable = [
+        r for r in rows
+        if r.get("group") == "C2" and r.get("refresh_outcome") in REFRESH_CLASSES
+    ]
+    result: dict[str, Any] = {
+        "scope": "C2 trials with refresh_outcome in the four frozen refresh classes; "
+                 "non-C2 groups and candidate-only rows excluded (not counted as 0)",
+        "applicable_trial_count": len(applicable),
+        "observation_wall_seconds": (
+            round(observation_wall_seconds, 6)
+            if isinstance(observation_wall_seconds, (int, float))
+            and observation_wall_seconds > 0 else NA_NO_WALL
+        ),
+        "observation_wall_source": "perf_counter, run first-trial to last-trial (wall clock)",
+        "successful_refresh_interval_source": "injected logical clock t_last_refresh_local",
+        "rate_source": "measured refresh_attempt_count / measured observation_wall_seconds (NOT 1/R)",
+    }
+    if not applicable:
+        for k in ("refresh_attempt_count", "refresh_success_count",
+                  "refresh_failure_count", "actual_refresh_request_rate",
+                  "successful_refresh_interval"):
+            result[k] = NA_NO_APPLICABLE
+        return result
+
+    attempts = 0
+    successes = 0
+    failures = 0
+    success_times: list[float] = []
+    for r in applicable:
+        a = r.get("refresh_attempts")
+        if isinstance(a, int) and not isinstance(a, bool):
+            attempts += a
+        outcome = r["refresh_outcome"]
+        if outcome == "REFRESH_SUCCESS":
+            successes += 1
+            tl = r.get("t_last_refresh_local")
+            if isinstance(tl, (int, float)) and not isinstance(tl, bool):
+                success_times.append(float(tl))
+        elif outcome in ("REFRESH_FAILED_STALE_CONTINUE", "REFRESH_FAILED_FAIL_CLOSED"):
+            failures += 1
+    result["refresh_attempt_count"] = attempts
+    result["refresh_success_count"] = successes
+    result["refresh_failure_count"] = failures
+
+    # Rate needs BOTH measured attempts and a positive measured wall duration.
+    wall = result["observation_wall_seconds"]
+    if isinstance(wall, (int, float)):
+        result["actual_refresh_request_rate"] = round(attempts / wall, 6)
+    else:
+        result["actual_refresh_request_rate"] = NA_NO_WALL
+
+    # Interval needs at least two successful refreshes to form a difference.
+    ordered = sorted(success_times)
+    if len(ordered) >= 2:
+        diffs = [round(b - a, 6) for a, b in zip(ordered, ordered[1:])]
+        result["successful_refresh_interval"] = {
+            "adjacent_diffs_s": diffs,
+            "median_s": round(sorted(diffs)[len(diffs) // 2], 6),
+        }
+    else:
+        result["successful_refresh_interval"] = NA_NO_SUCCESS
+    return result
+
+
 class Runner:
     def __init__(self, workdir: Path, n: int) -> None:
         self.workdir = workdir
         self.n = n
         self.rows: list[dict[str, Any]] = []
         self.raws: list[dict[str, Any]] = []
+        self.observation_wall_seconds: float | None = None  # R2: measured run duration
 
     def _harness(self, tag: str, *, validity: float = 120.0, refresh: float = 30.0) -> H2Harness:
         return H2Harness(
@@ -898,9 +996,14 @@ class Runner:
                  "m10", "m11", "m12", "m13", "m14", "m15")
 
     def run(self) -> None:
+        import time as _time
+        t0 = _time.perf_counter()
         for idx in range(self.n):
             for name in self.SCENARIOS:
                 getattr(self, name)(idx)
+        # R2: measured wall duration of the whole run (first-trial start to
+        # last-trial end), used only as the denominator of the request rate.
+        self.observation_wall_seconds = _time.perf_counter() - t0
 
 
 def write_outputs(outdir: Path, runner: Runner, n: int) -> dict[str, Any]:
@@ -919,6 +1022,10 @@ def write_outputs(outdir: Path, runner: Runner, n: int) -> dict[str, Any]:
         "passed_trials": passed,
         "failed_trials": len(runner.rows) - passed,
         "all_pass": passed == len(runner.rows),
+        # R2 / protocol §6.4: actual online-cost aggregates (never 1/R).
+        "refresh_cost_metrics": compute_refresh_metrics(
+            runner.rows, runner.observation_wall_seconds
+        ),
         "meta": {
             "action_domain": "h1-action-binding-v1",
             "snapshot_domain": SNAPSHOT_DOMAIN,

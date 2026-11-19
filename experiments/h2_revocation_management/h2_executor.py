@@ -125,6 +125,9 @@ class TrialResult:
     t_last_refresh_local: float | None = None
     t_query: float | None = None
     t_consume: float | None = None
+    # R2: derived/recorded observation fields (protocol §5.2/§5.3)
+    age_at_exec: float | None = None  # t_exec_attempt - t_last_refresh_local (injected clock)
+    bootstrap_snapshot_version: int | None = None  # HWM actually established at first bootstrap
     # refresh classification & counters (§5.3.5 / protocol §5.3, §6.4)
     refresh_outcome: str = "NA"
     refresh_attempts: int = 0
@@ -350,6 +353,15 @@ class H2Executor:
 
     # ---- C2 path: pre-exec refresh flow + revocation check ----
 
+    @staticmethod
+    def _record_c2_age(result: TrialResult) -> None:
+        """R2: age_at_exec = t_exec_attempt - t_last_refresh_local, both from
+        the injected logical clock, and consistent with the values written to
+        the trial row (fully recomputable from CSV, protocol §5.2)."""
+        ta, tl = result.t_exec_attempt, result.t_last_refresh_local
+        if ta is not None and tl is not None:
+            result.age_at_exec = ta - tl
+
     def _c2_prepare_refresh(self, *, jti: str, result: TrialResult) -> RestoredState | None:
         """Run §5.3 pre-exec decision; return the restored trusted state.
 
@@ -376,6 +388,11 @@ class H2Executor:
         result.t_last_refresh_local = restored.last_refresh_local
         result.initialized = True
         result.bootstrap_mode = restored.bootstrap_mode
+        # R2: record the ACTUAL snapshot's generated_at (never derived from a
+        # wall clock) and the HWM established at first bootstrap.
+        result.t_snapshot_generated = restored.cached_snapshot["generated_at"]
+        result.bootstrap_snapshot_version = restored.bootstrap_version
+        self._record_c2_age(result)
 
         now = self.clock.now()
         age = now - restored.last_refresh_local
@@ -420,8 +437,13 @@ class H2Executor:
                 result.snapshot_valid_until = new_state.cached_snapshot["valid_until"]
                 result.high_water_version = new_state.high_water_version
                 result.t_last_refresh_local = new_state.last_refresh_local
+                # R2: the selected snapshot is now the refreshed one; take its
+                # real generated_at and keep bootstrap_snapshot_version intact.
+                result.t_snapshot_generated = new_state.cached_snapshot["generated_at"]
+                result.bootstrap_snapshot_version = new_state.bootstrap_version
                 result.t_snapshot_obtained = now
                 result.w_risk_path = "ONLINE_REFRESH_OK"
+                self._record_c2_age(result)
                 accepted = True
             except SnapshotValidationError:
                 result.snapshot_accepted = False
@@ -470,6 +492,9 @@ class H2Executor:
         selected = restored.cached_snapshot
         result.snapshot_version_cached = selected["version"]
         result.snapshot_valid_until = selected["valid_until"]
+        # R2: pin generated_at/age to the snapshot actually used for this exec.
+        result.t_snapshot_generated = selected["generated_at"]
+        self._record_c2_age(result)
         if jti in selected.get("revoked_jtis", []):
             result.outcome = OUTCOME_REJECTED
             result.reason = REASON_REVOKED_BY_SNAPSHOT

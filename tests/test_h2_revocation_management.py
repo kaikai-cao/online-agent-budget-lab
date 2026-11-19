@@ -34,6 +34,13 @@ for p in (
 ):
     if p not in sys.path:
         sys.path.insert(0, p)
+# Both h1 and h2 dirs contain a run_experiment.py. Force the h2 copy to the
+# FRONT so `from run_experiment import compute_refresh_metrics` resolves to the
+# H2 runner, regardless of the order given in PYTHONPATH.
+_H2_DIR = str(REPO / "experiments" / "h2_revocation_management")
+if _H2_DIR in sys.path:
+    sys.path.remove(_H2_DIR)
+sys.path.insert(0, _H2_DIR)
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
 
@@ -63,6 +70,12 @@ from h2_snapshot_state import (  # noqa: E402
     SnapshotStateStore,
     StateAlreadyInitialized,
     StateUnavailable,
+)
+from run_experiment import (  # noqa: E402
+    NA_NO_APPLICABLE,
+    NA_NO_SUCCESS,
+    NA_NO_WALL,
+    compute_refresh_metrics,
 )
 
 
@@ -630,6 +643,166 @@ class TestH2RefreshCost(H2Fixture):
             self.assertTrue(sizes[0] < sizes[1] < sizes[2])
         finally:
             h.close()
+
+
+# ---------------------------------------------------------------------------
+# H2.1-R1 HWM 与缓存快照版本一致性（用户独立核查阻断项）
+# ---------------------------------------------------------------------------
+class TestH2R1HwmCacheConsistency(H2Fixture):
+    def test_r1_hwm_only_corruption_is_s2_and_c2_fails_closed(self):
+        """只篡改 HWM、保持 cached_snapshot 与 digest 不变；重开必须为 S2，
+        C2 拒绝执行、无副作用、不自动重 bootstrap。"""
+        h = self.harness()
+        try:
+            h.clock.set(0.0)
+            boot = h.executor.bootstrap_online()  # v1, hwm=1
+            jti, cred = h.authorize(ttl=300.0)
+            # Damage ONLY the persisted HWM (1 -> 5), leaving cache v1 + digest
+            # byte-for-byte intact. A digest-only check cannot detect this.
+            h.snapshot_state.corrupt_hwm_only_for_test(5)
+            h.snapshot_state = SnapshotStateStore(h.snapshot_state.db_path)
+            h.executor.snapshot_state = h.snapshot_state
+            self.assertEqual(h.snapshot_state.state(), STATE_S2_CORRUPT)
+            with self.assertRaises(StateUnavailable):
+                h.snapshot_state.restore()
+            r = h.executor.execute_c2(request=fresh_request(), credential=cred)
+            self.assertEqual(r.outcome, OUTCOME_REJECTED)
+            self.assertEqual(r.reason, "SNAPSHOT_STATE_UNAVAILABLE")
+            self.assertEqual(r.effects_added, 0)
+            # S2 never auto re-bootstrap; initialized stays true.
+            self.assertTrue(h.snapshot_state.is_initialized())
+            with self.assertRaises(StateUnavailable):
+                h.executor.bootstrap_online()
+        finally:
+            h.close()
+
+    def test_r1_corrupt_hwm_cannot_be_bypassed_by_mid_version_snapshot(self):
+        """损坏的 HWM 若被当作可信，版本 3~4 快照可越过 v1 缓存并重放旧撤销集；
+        一致性检查后 S2 直接 fail closed，任何候选都不得进入 accept_candidate。"""
+        h = self.harness()
+        try:
+            h.clock.set(0.0)
+            h.executor.bootstrap_online()  # cache v1, hwm=1
+            h.snapshot_state.corrupt_hwm_only_for_test(5)
+            h.snapshot_state = SnapshotStateStore(h.snapshot_state.db_path)
+            h.executor.snapshot_state = h.snapshot_state
+            # A validly-signed v4 (> corrupt hwm 5? no: 4<5, but > original 1)
+            # would previously find cache v1 with hwm read as 5 -> version 4
+            # <= 5 rejected; use v6 to show accept path is blocked by state(),
+            # independent of version arithmetic.
+            v6 = build_snapshot(
+                version=6, issuer=h.service.issuer, key_id=h.service.key_id,
+                generated_at=0.0, valid_from=0.0, valid_until=120.0,
+                revoked_jtis=[], signing_key=h.service.signing_key)
+            with self.assertRaises(StateUnavailable):
+                h.snapshot_state.accept_candidate(
+                    v6, trusted_keys=h.trusted_keys,
+                    trusted_issuer=h.service.issuer, now=0.0)
+            self.assertEqual(h.snapshot_state.state(), STATE_S2_CORRUPT)
+        finally:
+            h.close()
+
+    def test_r1_hwm_cache_version_consistent_after_normal_refresh(self):
+        """正常 bootstrap 与成功刷新后 hwm==cached.version，S1 可恢复（不误报 S2）。"""
+        h = self.harness()
+        try:
+            h.clock.set(0.0)
+            boot = h.executor.bootstrap_online()
+            self.assertEqual(boot.high_water_version, boot.cached_snapshot["version"])
+            jti, cred = h.authorize(ttl=300.0)
+            h.clock.set(40.0)  # age>=R -> refresh success
+            r = h.executor.execute_c2(request=fresh_request(), credential=cred)
+            self.assertEqual(r.refresh_outcome, "REFRESH_SUCCESS")
+            st = h.snapshot_state.restore()
+            self.assertEqual(st.high_water_version, st.cached_snapshot["version"])
+            self.assertEqual(h.snapshot_state.state(), STATE_S1_RESTORE)
+        finally:
+            h.close()
+
+
+# ---------------------------------------------------------------------------
+# H2.1-R2 关键字段与刷新聚合指标（用户独立核查阻断项）
+# ---------------------------------------------------------------------------
+class TestH2R2FieldsAndAggregates(H2Fixture):
+    def test_r2_c2_trial_records_generated_age_and_bootstrap_version(self):
+        """C2 适用 trial 必须获得真实数值，而非 NA/NULL。"""
+        h = self.harness(refresh=30.0)
+        try:
+            h.clock.set(0.0)
+            boot = h.executor.bootstrap_online()  # generated_at=0, hwm=1
+            jti, cred = h.authorize(ttl=300.0)
+            # age<R -> NO_REFRESH_NEEDED, uses bootstrap snapshot (generated_at=0)
+            r = h.executor.execute_c2(request=fresh_request(), credential=cred)
+            self.assertEqual(r.refresh_outcome, "NO_REFRESH_NEEDED")
+            self.assertEqual(r.t_snapshot_generated, 0.0)
+            self.assertEqual(r.age_at_exec, 0.0 - 0.0)
+            self.assertEqual(r.bootstrap_snapshot_version, boot.cached_snapshot["version"])
+            self.assertEqual(r.bootstrap_snapshot_version, 1)
+
+            # age>=R -> refresh success; generated_at comes from actual new
+            # snapshot, age recomputed with updated t_last_refresh_local.
+            h.clock.set(40.0)
+            jti2, cred2 = h.authorize(ttl=300.0)
+            r2 = h.executor.execute_c2(request=fresh_request(), credential=cred2)
+            self.assertEqual(r2.refresh_outcome, "REFRESH_SUCCESS")
+            self.assertIsNotNone(r2.t_snapshot_generated)
+            self.assertEqual(r2.t_snapshot_generated, 40.0)  # actual snapshot field
+            self.assertEqual(r2.age_at_exec, r2.t_exec_attempt - r2.t_last_refresh_local)
+            self.assertEqual(r2.bootstrap_snapshot_version, 1)  # never rewritten
+        finally:
+            h.close()
+
+    def test_r2_non_c2_and_unborn_events_stay_na(self):
+        """非适用组 / 未发生事件保持 NA，不得伪造数值。"""
+        h = self.harness()
+        try:
+            h.clock.set(0.0)
+            jti, cred = h.authorize(ttl=300.0)
+            r = h.executor.execute_c_offline(
+                group="C0", request=fresh_request(), credential=cred)
+            self.assertEqual(r.group, "C0")
+            self.assertIsNone(r.age_at_exec)
+            self.assertIsNone(r.bootstrap_snapshot_version)
+            self.assertIsNone(r.t_snapshot_generated)
+        finally:
+            h.close()
+
+    def test_r2_refresh_metrics_from_measured_counters(self):
+        """五个聚合指标由实测计数/墙钟计算，不用 1/R；NA 不当 0。"""
+        rows = [
+            {"group": "C2", "refresh_outcome": "REFRESH_SUCCESS",
+             "refresh_attempts": 1, "t_last_refresh_local": 0.0},
+            {"group": "C2", "refresh_outcome": "REFRESH_FAILED_STALE_CONTINUE",
+             "refresh_attempts": 1, "t_last_refresh_local": 0.0},
+            {"group": "C2", "refresh_outcome": "REFRESH_SUCCESS",
+             "refresh_attempts": 1, "t_last_refresh_local": 40.0},
+            {"group": "C0", "refresh_outcome": "NA", "refresh_attempts": 0},
+            # candidate-only row (M08/M09): excluded from scope
+            {"group": "C2", "refresh_outcome": "NA", "refresh_attempts": 0},
+        ]
+        m = compute_refresh_metrics(rows, 2.0)
+        self.assertEqual(m["applicable_trial_count"], 3)
+        self.assertEqual(m["refresh_attempt_count"], 3)
+        self.assertEqual(m["refresh_success_count"], 2)
+        self.assertEqual(m["refresh_failure_count"], 1)
+        self.assertEqual(m["actual_refresh_request_rate"], 1.5)  # 3/2.0, NOT 1/R
+        self.assertIsInstance(m["successful_refresh_interval"], dict)
+        self.assertEqual(m["successful_refresh_interval"]["adjacent_diffs_s"], [40.0])
+
+        # No applicable C2 trial -> explicit NA, never 0.
+        empty = compute_refresh_metrics([], 1.0)
+        self.assertEqual(empty["refresh_attempt_count"], NA_NO_APPLICABLE)
+        self.assertEqual(empty["actual_refresh_request_rate"], NA_NO_APPLICABLE)
+
+        # Applicable but no wall time -> rate NA with its own marker.
+        nowall = compute_refresh_metrics(rows, None)
+        self.assertEqual(nowall["actual_refresh_request_rate"], NA_NO_WALL)
+
+        # Fewer than two successes -> interval NA, never 0.
+        one = compute_refresh_metrics(
+            [{"group": "C2", "refresh_outcome": "REFRESH_SUCCESS",
+              "refresh_attempts": 1, "t_last_refresh_local": 0.0}], 1.0)
+        self.assertEqual(one["successful_refresh_interval"], NA_NO_SUCCESS)
 
 
 if __name__ == "__main__":
