@@ -73,6 +73,7 @@ from h2_snapshot_state import (  # noqa: E402
 )
 from run_experiment import (  # noqa: E402
     NA_NO_APPLICABLE,
+    NA_NO_CONTINUOUS_CLOCK,
     NA_NO_SUCCESS,
     NA_NO_WALL,
     compute_refresh_metrics,
@@ -767,42 +768,130 @@ class TestH2R2FieldsAndAggregates(H2Fixture):
         finally:
             h.close()
 
-    def test_r2_refresh_metrics_from_measured_counters(self):
-        """五个聚合指标由实测计数/墙钟计算，不用 1/R；NA 不当 0。"""
-        rows = [
-            {"group": "C2", "refresh_outcome": "REFRESH_SUCCESS",
-             "refresh_attempts": 1, "t_last_refresh_local": 0.0},
-            {"group": "C2", "refresh_outcome": "REFRESH_FAILED_STALE_CONTINUE",
-             "refresh_attempts": 1, "t_last_refresh_local": 0.0},
-            {"group": "C2", "refresh_outcome": "REFRESH_SUCCESS",
-             "refresh_attempts": 1, "t_last_refresh_local": 40.0},
-            {"group": "C0", "refresh_outcome": "NA", "refresh_attempts": 0},
-            # candidate-only row (M08/M09): excluded from scope
-            {"group": "C2", "refresh_outcome": "NA", "refresh_attempts": 0},
-        ]
-        m = compute_refresh_metrics(rows, 2.0)
-        self.assertEqual(m["applicable_trial_count"], 3)
-        self.assertEqual(m["refresh_attempt_count"], 3)
-        self.assertEqual(m["refresh_success_count"], 2)
-        self.assertEqual(m["refresh_failure_count"], 1)
-        self.assertEqual(m["actual_refresh_request_rate"], 1.5)  # 3/2.0, NOT 1/R
-        self.assertIsInstance(m["successful_refresh_interval"], dict)
-        self.assertEqual(m["successful_refresh_interval"]["adjacent_diffs_s"], [40.0])
+    @staticmethod
+    def _metric_row(scenario, group, arm, outcome, attempts,
+                    t_last=None, instance=None):
+        """Synthetic §5-style row for the pure metric function."""
+        row = {
+            "scenario_id": scenario, "group": group, "arm": arm,
+            "refresh_outcome": outcome, "refresh_attempts": attempts,
+        }
+        if t_last is not None:
+            row["t_last_refresh_local"] = t_last
+        if instance is not None:
+            row["_instance_id"] = instance
+        return row
 
-        # No applicable C2 trial -> explicit NA, never 0.
-        empty = compute_refresh_metrics([], 1.0)
+    def test_r2_refresh_metrics_per_unit_not_merged(self):
+        """R2.1-A：不同 scenario/group/arm 的计数与请求率不得混合。"""
+        rows = [
+            self._metric_row("M01", "C2", "base", "NO_REFRESH_NEEDED", 0),
+            self._metric_row("M04", "C2", "base", "REFRESH_SUCCESS", 1, 40.0, "i1"),
+            self._metric_row("M05", "C2", "base",
+                             "REFRESH_FAILED_STALE_CONTINUE", 2, None, "i2"),
+            # candidate-only row and a non-C2 row are out of scope
+            self._metric_row("M09", "C2", "expired", "NA", 0),
+            self._metric_row("M01", "C0", "base", "NA", 0),
+        ]
+        walls = {
+            ("M01", "C2", "base"): 0.5,
+            ("M04", "C2", "base"): 2.0,
+            ("M05", "C2", "base"): 4.0,
+        }
+        m = compute_refresh_metrics(rows, walls)
+        self.assertEqual(m["unit_count"], 3)
+        self.assertEqual(m["applicable_trial_count"], 3)
+        by_key = {(u["scenario_id"], u["group"], u["arm"]): u for u in m["units"]}
+        self.assertEqual(by_key[("M01", "C2", "base")]["refresh_attempt_count"], 0)
+        self.assertEqual(by_key[("M04", "C2", "base")]["refresh_attempt_count"], 1)
+        self.assertEqual(by_key[("M04", "C2", "base")]["refresh_success_count"], 1)
+        self.assertEqual(by_key[("M05", "C2", "base")]["refresh_attempt_count"], 2)
+        self.assertEqual(by_key[("M05", "C2", "base")]["refresh_failure_count"], 1)
+        # Each rate uses its OWN wall: 1/2 and 2/4, not (1+2)/(2+4).
+        self.assertEqual(
+            by_key[("M04", "C2", "base")]["actual_refresh_request_rate"], 0.5)
+        self.assertEqual(
+            by_key[("M05", "C2", "base")]["actual_refresh_request_rate"], 0.5)
+        # A real observation of zero attempts with a valid wall is 0.0, not NA.
+        self.assertEqual(
+            by_key[("M01", "C2", "base")]["actual_refresh_request_rate"], 0.0)
+        # No merged cross-unit rate is emitted at the top level.
+        self.assertNotIn("actual_refresh_request_rate", m)
+
+    def test_r2_non_c2_time_not_in_c2_denominator(self):
+        """R2.1-A：非 C2 / 其他场景的运行时间不得进入 C2 请求率分母。"""
+        rows = [self._metric_row(
+            "M14", "C2", "intermittent_pathA", "REFRESH_SUCCESS", 1, 40.0, "c2i")]
+        key = ("M14", "C2", "intermittent_pathA")
+        # This unit's own duration is 2s; the whole run might be 1000s.
+        unit = compute_refresh_metrics(rows, {key: 2.0})["units"][0]
+        self.assertEqual(unit["observation_wall_seconds"], 2.0)
+        self.assertEqual(unit["actual_refresh_request_rate"], 0.5)  # 1/2, not 1/1000
+        # Without a unit-scoped wall the rate must be NA, never diluted by a
+        # global run duration passed in some other shape.
+        missing = compute_refresh_metrics(rows, {})["units"][0]
+        self.assertEqual(missing["actual_refresh_request_rate"], NA_NO_WALL)
+
+    def test_r2_cross_harness_times_never_form_interval(self):
+        """R2.1-B：不同 Harness（逻辑时钟重启）的时间不得算成刷新间隔。"""
+        key = ("M14", "C2", "intermittent_pathA")
+        rows = [
+            self._metric_row("M14", "C2", "intermittent_pathA",
+                             "REFRESH_SUCCESS", 1, 40.0, "harness-A"),
+            self._metric_row("M14", "C2", "intermittent_pathA",
+                             "REFRESH_SUCCESS", 1, 10.0, "harness-B"),
+        ]
+        unit = compute_refresh_metrics(rows, {key: 3.0})["units"][0]
+        self.assertEqual(unit["refresh_success_count"], 2)
+        # 40 and 10 are not on one timeline; a 30s (or 40s) diff would be invented.
+        self.assertEqual(unit["successful_refresh_interval"], NA_NO_CONTINUOUS_CLOCK)
+        self.assertNotIsInstance(unit["successful_refresh_interval"], dict)
+
+    def test_r2_same_instance_interval_is_computed(self):
+        """同一执行实例内的相邻成功刷新仍须能算出真实间隔（机制未退化为常量 NA）。"""
+        key = ("M14", "C2", "intermittent_pathA")
+        rows = [
+            self._metric_row("M14", "C2", "intermittent_pathA",
+                             "REFRESH_SUCCESS", 1, 10.0, "harness-A"),
+            self._metric_row("M14", "C2", "intermittent_pathA",
+                             "REFRESH_SUCCESS", 1, 30.0, "harness-A"),
+        ]
+        unit = compute_refresh_metrics(rows, {key: 2.0})["units"][0]
+        self.assertEqual(
+            unit["successful_refresh_interval"]["adjacent_diffs_s"], [20.0])
+
+    def test_r2_missing_metrics_stay_na_never_zero(self):
+        """不可计算必须显式 NA，不得记 0。"""
+        empty = compute_refresh_metrics([], {})
         self.assertEqual(empty["refresh_attempt_count"], NA_NO_APPLICABLE)
         self.assertEqual(empty["actual_refresh_request_rate"], NA_NO_APPLICABLE)
+        self.assertEqual(empty["units"], [])
 
-        # Applicable but no wall time -> rate NA with its own marker.
-        nowall = compute_refresh_metrics(rows, None)
-        self.assertEqual(nowall["actual_refresh_request_rate"], NA_NO_WALL)
+        rows = [self._metric_row("M01", "C2", "base", "NO_REFRESH_NEEDED", 0)]
+        no_wall = compute_refresh_metrics(rows, None)["units"][0]
+        self.assertEqual(no_wall["observation_wall_seconds"], NA_NO_WALL)
+        self.assertEqual(no_wall["actual_refresh_request_rate"], NA_NO_WALL)
+        self.assertNotEqual(no_wall["actual_refresh_request_rate"], 0)
 
-        # Fewer than two successes -> interval NA, never 0.
+        key = ("M04", "C2", "base")
         one = compute_refresh_metrics(
-            [{"group": "C2", "refresh_outcome": "REFRESH_SUCCESS",
-              "refresh_attempts": 1, "t_last_refresh_local": 0.0}], 1.0)
+            [self._metric_row("M04", "C2", "base", "REFRESH_SUCCESS", 1, 0.0, "i")],
+            {key: 1.0})["units"][0]
         self.assertEqual(one["successful_refresh_interval"], NA_NO_SUCCESS)
+
+    def test_r2_runner_measures_wall_per_unit(self):
+        """Runner 必须按单元累计墙钟，而不是记录整轮运行时长作分母。"""
+        from run_experiment import Runner
+        r = Runner(workdir=self.workdir / "runner-unit-wall", n=1)
+        r.m01(0)  # four groups, one unit each
+        self.assertGreaterEqual(len(r.unit_wall), 4)
+        keys = set(r.unit_wall)
+        self.assertIn(("M01_legal_exec", "C2", "base"), keys)
+        self.assertIn(("M01_legal_exec", "B2", "base"), keys)
+        for v in r.unit_wall.values():
+            self.assertGreater(v, 0.0)
+        # The whole-run diagnostic is a separate value, not used per unit.
+        self.assertIsNone(r.run_wall_seconds)
 
 
 if __name__ == "__main__":

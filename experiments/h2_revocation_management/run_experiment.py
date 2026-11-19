@@ -23,6 +23,7 @@ import csv
 import json
 import sys
 import tempfile
+import time
 import threading
 import uuid
 from pathlib import Path
@@ -185,11 +186,16 @@ def _finalize(row: dict[str, Any], expected: str, raw: dict[str, Any]) -> None:
     raw["row"] = dict(row)
 
 
-# R2 / protocol §6.4: five independent actual-online-cost metrics. Statistical
-# scope = C2 trials whose refresh_outcome is one of the four frozen refresh
-# classes (i.e. C2 actually ran the pre-exec refresh decision). Non-C2 groups
+# R2.1 / protocol §6.4: five independent actual-online-cost metrics, computed
+# PER EXPERIMENT UNIT (scenario_id + group + arm). Units are never merged.
+# Rationale (independent review R2.1): the runner interleaves all scenarios in
+# every repetition, so a single global wall duration would let B2/C0/C1 (and
+# every other scenario) inflate the C2 request-rate denominator, and summing
+# attempts across groups would no longer be "unit-internal actual attempts".
+# Statistical scope = C2 trials whose refresh_outcome is one of the four frozen
+# refresh classes (C2 actually ran the pre-exec refresh decision). Non-C2 groups
 # and C2 candidate-only rows (M07/M08/M09, refresh_outcome='NA') are excluded,
-# NOT counted as zero. Missing/insufficient data uses an explicit NA marker so
+# NOT counted as zero. Missing/uncomputable values use an explicit NA marker so
 # that absence is never silently reported as 0.
 REFRESH_CLASSES = {
     "REFRESH_SUCCESS",
@@ -200,79 +206,123 @@ REFRESH_CLASSES = {
 NA_NO_APPLICABLE = "NA_NO_APPLICABLE_C2_TRIAL"
 NA_NO_WALL = "NA_NO_OBSERVATION_WALL_SECONDS"
 NA_NO_SUCCESS = "NA_LESS_THAN_TWO_REFRESH_SUCCESSES"
+NA_NO_CONTINUOUS_CLOCK = "NA_NO_CONTINUOUS_LOGICAL_CLOCK"
+UNIT_KEY_FIELDS = ("scenario_id", "group", "arm")
+
+
+def unit_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    """Experiment-unit identity (protocol §6.4): scenario + group + arm."""
+    return tuple(str(row.get(k, "NA")) for k in UNIT_KEY_FIELDS)  # type: ignore[return-value]
+
+
+def _unit_metrics(
+    rows: list[dict[str, Any]],
+    wall_seconds: float | None,
+) -> dict[str, Any]:
+    """Five §6.4 metrics for ONE unit; no cross-unit aggregation here."""
+    attempts = 0
+    successes = 0
+    failures = 0
+    # success times are kept PER EXECUTION INSTANCE: only two refreshes from the
+    # same harness share one continuous logical clock and may form an interval.
+    success_times: dict[str, list[float]] = {}
+    for r in rows:
+        a = r.get("refresh_attempts")
+        if isinstance(a, int) and not isinstance(a, bool):
+            attempts += a
+        outcome = r.get("refresh_outcome")
+        if outcome == "REFRESH_SUCCESS":
+            successes += 1
+            tl = r.get("t_last_refresh_local")
+            if isinstance(tl, (int, float)) and not isinstance(tl, bool):
+                inst = str(r.get("_instance_id", "UNKNOWN_INSTANCE"))
+                success_times.setdefault(inst, []).append(float(tl))
+        elif outcome in ("REFRESH_FAILED_STALE_CONTINUE", "REFRESH_FAILED_FAIL_CLOSED"):
+            failures += 1
+
+    wall = (round(wall_seconds, 6)
+            if isinstance(wall_seconds, (int, float)) and wall_seconds > 0
+            else NA_NO_WALL)
+    unit: dict[str, Any] = {
+        "trial_count": len(rows),
+        "refresh_attempt_count": attempts,
+        "refresh_success_count": successes,
+        "refresh_failure_count": failures,
+        "observation_wall_seconds": wall,
+        "observation_wall_source": (
+            "sum of this unit's own per-trial perf_counter durations "
+            "(harness setup -> result row); other units' time excluded"
+        ),
+        "successful_refresh_interval_source": (
+            "injected logical clock t_last_refresh_local, same execution "
+            "instance only (a fresh harness restarts the logical clock)"
+        ),
+    }
+    unit["actual_refresh_request_rate"] = (
+        round(attempts / wall, 6) if isinstance(wall, (int, float)) else NA_NO_WALL
+    )
+
+    diffs: list[float] = []
+    for ts in success_times.values():
+        ordered = sorted(ts)
+        if len(ordered) >= 2:
+            diffs.extend(round(b - a, 6) for a, b in zip(ordered, ordered[1:]))
+    if diffs:
+        ordered_diffs = sorted(diffs)
+        unit["successful_refresh_interval"] = {
+            "adjacent_diffs_s": ordered_diffs,
+            "median_s": round(ordered_diffs[len(ordered_diffs) // 2], 6),
+        }
+    elif successes >= 2:
+        # Two successes exist but they come from different harnesses, i.e.
+        # different logical clock origins. Computing a difference would invent
+        # a continuity that was never observed.
+        unit["successful_refresh_interval"] = NA_NO_CONTINUOUS_CLOCK
+    else:
+        unit["successful_refresh_interval"] = NA_NO_SUCCESS
+    return unit
 
 
 def compute_refresh_metrics(
     rows: list[dict[str, Any]],
-    observation_wall_seconds: float | None,
+    unit_wall_seconds: dict[tuple[str, str, str], float] | None = None,
 ) -> dict[str, Any]:
-    """Compute protocol §6.4 five metrics from ACTUAL per-trial observations.
+    """Protocol §6.4 five metrics, reported per experiment unit.
 
-    ``actual_refresh_request_rate`` uses measured attempt counts over measured
-    wall seconds (never ``1/R``). ``successful_refresh_interval`` uses the
-    injected logical clock ``t_last_refresh_local`` (same system as ``R``).
+    ``unit_wall_seconds`` maps ``(scenario_id, group, arm)`` to that unit's own
+    measured wall duration. A single global run duration is NEVER accepted here:
+    it would put non-C2 execution time into the C2 denominator. ``None`` or a
+    missing key yields an explicit NA for that unit's rate.
     """
-    applicable = [
-        r for r in rows
-        if r.get("group") == "C2" and r.get("refresh_outcome") in REFRESH_CLASSES
-    ]
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for r in rows:
+        if r.get("group") != "C2":
+            continue
+        if r.get("refresh_outcome") not in REFRESH_CLASSES:
+            continue
+        grouped.setdefault(unit_key(r), []).append(r)
+
     result: dict[str, Any] = {
-        "scope": "C2 trials with refresh_outcome in the four frozen refresh classes; "
-                 "non-C2 groups and candidate-only rows excluded (not counted as 0)",
-        "applicable_trial_count": len(applicable),
-        "observation_wall_seconds": (
-            round(observation_wall_seconds, 6)
-            if isinstance(observation_wall_seconds, (int, float))
-            and observation_wall_seconds > 0 else NA_NO_WALL
-        ),
-        "observation_wall_source": "perf_counter, run first-trial to last-trial (wall clock)",
-        "successful_refresh_interval_source": "injected logical clock t_last_refresh_local",
-        "rate_source": "measured refresh_attempt_count / measured observation_wall_seconds (NOT 1/R)",
+        "scope": "per unit (scenario_id + group + arm); C2 trials with "
+                 "refresh_outcome in the four frozen refresh classes; non-C2 "
+                 "groups and candidate-only rows excluded (not counted as 0)",
+        "unit_key": "scenario_id + group + arm",
+        "unit_count": len(grouped),
+        "applicable_trial_count": sum(len(v) for v in grouped.values()),
+        "units": [],
     }
-    if not applicable:
+    if not grouped:
         for k in ("refresh_attempt_count", "refresh_success_count",
                   "refresh_failure_count", "actual_refresh_request_rate",
                   "successful_refresh_interval"):
             result[k] = NA_NO_APPLICABLE
         return result
 
-    attempts = 0
-    successes = 0
-    failures = 0
-    success_times: list[float] = []
-    for r in applicable:
-        a = r.get("refresh_attempts")
-        if isinstance(a, int) and not isinstance(a, bool):
-            attempts += a
-        outcome = r["refresh_outcome"]
-        if outcome == "REFRESH_SUCCESS":
-            successes += 1
-            tl = r.get("t_last_refresh_local")
-            if isinstance(tl, (int, float)) and not isinstance(tl, bool):
-                success_times.append(float(tl))
-        elif outcome in ("REFRESH_FAILED_STALE_CONTINUE", "REFRESH_FAILED_FAIL_CLOSED"):
-            failures += 1
-    result["refresh_attempt_count"] = attempts
-    result["refresh_success_count"] = successes
-    result["refresh_failure_count"] = failures
-
-    # Rate needs BOTH measured attempts and a positive measured wall duration.
-    wall = result["observation_wall_seconds"]
-    if isinstance(wall, (int, float)):
-        result["actual_refresh_request_rate"] = round(attempts / wall, 6)
-    else:
-        result["actual_refresh_request_rate"] = NA_NO_WALL
-
-    # Interval needs at least two successful refreshes to form a difference.
-    ordered = sorted(success_times)
-    if len(ordered) >= 2:
-        diffs = [round(b - a, 6) for a, b in zip(ordered, ordered[1:])]
-        result["successful_refresh_interval"] = {
-            "adjacent_diffs_s": diffs,
-            "median_s": round(sorted(diffs)[len(diffs) // 2], 6),
-        }
-    else:
-        result["successful_refresh_interval"] = NA_NO_SUCCESS
+    for key in sorted(grouped):
+        wall = None if unit_wall_seconds is None else unit_wall_seconds.get(key)
+        unit = {"scenario_id": key[0], "group": key[1], "arm": key[2]}
+        unit.update(_unit_metrics(grouped[key], wall))
+        result["units"].append(unit)
     return result
 
 
@@ -282,16 +332,37 @@ class Runner:
         self.n = n
         self.rows: list[dict[str, Any]] = []
         self.raws: list[dict[str, Any]] = []
-        self.observation_wall_seconds: float | None = None  # R2: measured run duration
+        # R2.1: unit-scoped measured wall duration -> rate denominator. Keyed by
+        # (scenario_id, group, arm) so no other unit's time can enter it.
+        self.unit_wall: dict[tuple[str, str, str], float] = {}
+        self.run_wall_seconds: float | None = None  # diagnostic only, never a rate denominator
+        self._trial_t0: float = 0.0
+        self._instance_id: str = ""
 
     def _harness(self, tag: str, *, validity: float = 120.0, refresh: float = 30.0) -> H2Harness:
-        return H2Harness(
+        # A new harness = a new execution instance with a fresh logical clock.
+        # This id is the only evidence that two refresh timestamps are comparable.
+        self._instance_id = uuid.uuid4().hex
+        h = H2Harness(
             workdir=self.workdir / tag,
             validity_seconds=validity,
             refresh_interval=refresh,
         )
+        # Start the unit clock AFTER harness setup: TLS server startup is a
+        # fixed per-harness cost, not an observation window for this unit.
+        self._trial_t0 = time.perf_counter()
+        return h
 
     def emit(self, row: dict[str, Any], expected: str, **raw: Any) -> None:
+        # Charge this unit only for its own trial duration. The runner
+        # interleaves scenarios, so "first row to last row" across repetitions
+        # would include other units' execution time.
+        now = time.perf_counter()
+        elapsed = max(0.0, now - self._trial_t0)
+        self._trial_t0 = now
+        key = unit_key(row)
+        self.unit_wall[key] = self.unit_wall.get(key, 0.0) + elapsed
+        row["_instance_id"] = self._instance_id
         _finalize(row, expected, raw)
         self.rows.append(row)
         self.raws.append(raw)
@@ -996,20 +1067,21 @@ class Runner:
                  "m10", "m11", "m12", "m13", "m14", "m15")
 
     def run(self) -> None:
-        import time as _time
-        t0 = _time.perf_counter()
+        t0 = time.perf_counter()
         for idx in range(self.n):
             for name in self.SCENARIOS:
                 getattr(self, name)(idx)
-        # R2: measured wall duration of the whole run (first-trial start to
-        # last-trial end), used only as the denominator of the request rate.
-        self.observation_wall_seconds = _time.perf_counter() - t0
+        # Diagnostic only. The request rate uses per-unit durations, not this
+        # whole-run wall time (which contains B2/C0/C1 and every other scenario).
+        self.run_wall_seconds = time.perf_counter() - t0
 
 
 def write_outputs(outdir: Path, runner: Runner, n: int) -> dict[str, Any]:
     outdir.mkdir(parents=True, exist_ok=True)
     with (outdir / "trials.csv").open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
+        # FIELDS is the frozen protocol §5 field set; internal diagnostics such
+        # as _instance_id are intentionally not written as data columns.
+        w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(runner.rows)
     passed = sum(1 for r in runner.rows if r["pass"] == "TRUE")
@@ -1022,9 +1094,15 @@ def write_outputs(outdir: Path, runner: Runner, n: int) -> dict[str, Any]:
         "passed_trials": passed,
         "failed_trials": len(runner.rows) - passed,
         "all_pass": passed == len(runner.rows),
-        # R2 / protocol §6.4: actual online-cost aggregates (never 1/R).
+        # R2.1 / protocol §6.4: actual online-cost metrics per experiment unit
+        # (scenario_id + group + arm). Never 1/R, never a merged cross-unit rate.
         "refresh_cost_metrics": compute_refresh_metrics(
-            runner.rows, runner.observation_wall_seconds
+            runner.rows, runner.unit_wall
+        ),
+        # Diagnostic only; explicitly NOT used as a rate denominator.
+        "run_wall_seconds": (
+            round(runner.run_wall_seconds, 6)
+            if isinstance(runner.run_wall_seconds, (int, float)) else NA_NO_WALL
         ),
         "meta": {
             "action_domain": "h1-action-binding-v1",
@@ -1034,6 +1112,8 @@ def write_outputs(outdir: Path, runner: Runner, n: int) -> dict[str, Any]:
             "time_system": "injected logical clock for windows; perf_counter for costs only",
             "expected_outcome_is_assertion_only": True,
             "actual_outcomes_observed": True,
+            "refresh_metric_unit": "scenario_id + group + arm (units never merged)",
+            "run_wall_seconds_scope": "diagnostic only; not a request-rate denominator",
         },
     }
     (outdir / "summary.json").write_text(
