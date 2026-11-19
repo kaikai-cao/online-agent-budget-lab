@@ -23,6 +23,7 @@ import threading
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
@@ -775,6 +776,7 @@ class TestH2R2FieldsAndAggregates(H2Fixture):
         row = {
             "scenario_id": scenario, "group": group, "arm": arm,
             "refresh_outcome": outcome, "refresh_attempts": attempts,
+            "actual_outcome": "EXECUTED",
         }
         if t_last is not None:
             row["t_last_refresh_local"] = t_last
@@ -793,12 +795,12 @@ class TestH2R2FieldsAndAggregates(H2Fixture):
             self._metric_row("M09", "C2", "expired", "NA", 0),
             self._metric_row("M01", "C0", "base", "NA", 0),
         ]
-        walls = {
-            ("M01", "C2", "base"): 0.5,
-            ("M04", "C2", "base"): 2.0,
-            ("M05", "C2", "base"): 4.0,
+        windows = {
+            ("M01", "C2", "base"): (0.0, 0.5),
+            ("M04", "C2", "base"): (0.0, 2.0),
+            ("M05", "C2", "base"): (0.0, 4.0),
         }
-        m = compute_refresh_metrics(rows, walls)
+        m = compute_refresh_metrics(rows, windows)
         self.assertEqual(m["unit_count"], 3)
         self.assertEqual(m["applicable_trial_count"], 3)
         by_key = {(u["scenario_id"], u["group"], u["arm"]): u for u in m["units"]}
@@ -807,7 +809,7 @@ class TestH2R2FieldsAndAggregates(H2Fixture):
         self.assertEqual(by_key[("M04", "C2", "base")]["refresh_success_count"], 1)
         self.assertEqual(by_key[("M05", "C2", "base")]["refresh_attempt_count"], 2)
         self.assertEqual(by_key[("M05", "C2", "base")]["refresh_failure_count"], 1)
-        # Each rate uses its OWN wall: 1/2 and 2/4, not (1+2)/(2+4).
+        # Each rate uses its OWN first->last span: 1/2 and 2/4, not (1+2)/(2+4).
         self.assertEqual(
             by_key[("M04", "C2", "base")]["actual_refresh_request_rate"], 0.5)
         self.assertEqual(
@@ -818,18 +820,17 @@ class TestH2R2FieldsAndAggregates(H2Fixture):
         # No merged cross-unit rate is emitted at the top level.
         self.assertNotIn("actual_refresh_request_rate", m)
 
-    def test_r2_non_c2_time_not_in_c2_denominator(self):
-        """R2.1-A：非 C2 / 其他场景的运行时间不得进入 C2 请求率分母。"""
+    def test_r22_first_last_span_is_the_denominator(self):
+        """R2.2：请求率 = 单元实际尝试数 / 该单元首末 trial 墙钟跨度。"""
         rows = [self._metric_row(
             "M14", "C2", "intermittent_pathA", "REFRESH_SUCCESS", 1, 40.0, "c2i")]
         key = ("M14", "C2", "intermittent_pathA")
-        # This unit's own duration is 2s; the whole run might be 1000s.
-        unit = compute_refresh_metrics(rows, {key: 2.0})["units"][0]
+        unit = compute_refresh_metrics(rows, {key: (2.0, 4.0)})["units"][0]
         self.assertEqual(unit["observation_wall_seconds"], 2.0)
-        self.assertEqual(unit["actual_refresh_request_rate"], 0.5)  # 1/2, not 1/1000
-        # Without a unit-scoped wall the rate must be NA, never diluted by a
-        # global run duration passed in some other shape.
+        self.assertEqual(unit["actual_refresh_request_rate"], 0.5)  # 1/(4-2)
+        # No unit-scoped endpoints -> NA, never a whole-run duration or 0.
         missing = compute_refresh_metrics(rows, {})["units"][0]
+        self.assertEqual(missing["observation_wall_seconds"], NA_NO_WALL)
         self.assertEqual(missing["actual_refresh_request_rate"], NA_NO_WALL)
 
     def test_r2_cross_harness_times_never_form_interval(self):
@@ -841,7 +842,7 @@ class TestH2R2FieldsAndAggregates(H2Fixture):
             self._metric_row("M14", "C2", "intermittent_pathA",
                              "REFRESH_SUCCESS", 1, 10.0, "harness-B"),
         ]
-        unit = compute_refresh_metrics(rows, {key: 3.0})["units"][0]
+        unit = compute_refresh_metrics(rows, {key: (0.0, 3.0)})["units"][0]
         self.assertEqual(unit["refresh_success_count"], 2)
         # 40 and 10 are not on one timeline; a 30s (or 40s) diff would be invented.
         self.assertEqual(unit["successful_refresh_interval"], NA_NO_CONTINUOUS_CLOCK)
@@ -856,7 +857,7 @@ class TestH2R2FieldsAndAggregates(H2Fixture):
             self._metric_row("M14", "C2", "intermittent_pathA",
                              "REFRESH_SUCCESS", 1, 30.0, "harness-A"),
         ]
-        unit = compute_refresh_metrics(rows, {key: 2.0})["units"][0]
+        unit = compute_refresh_metrics(rows, {key: (0.0, 2.0)})["units"][0]
         self.assertEqual(
             unit["successful_refresh_interval"]["adjacent_diffs_s"], [20.0])
 
@@ -876,22 +877,80 @@ class TestH2R2FieldsAndAggregates(H2Fixture):
         key = ("M04", "C2", "base")
         one = compute_refresh_metrics(
             [self._metric_row("M04", "C2", "base", "REFRESH_SUCCESS", 1, 0.0, "i")],
-            {key: 1.0})["units"][0]
+            {key: (0.0, 1.0)})["units"][0]
         self.assertEqual(one["successful_refresh_interval"], NA_NO_SUCCESS)
 
-    def test_r2_runner_measures_wall_per_unit(self):
-        """Runner 必须按单元累计墙钟，而不是记录整轮运行时长作分母。"""
+    def test_r22_runner_records_first_start_last_end(self):
+        """Runner 必须记录单元首末 trial 的 perf_counter 时刻，而非累计活跃时间。"""
         from run_experiment import Runner
-        r = Runner(workdir=self.workdir / "runner-unit-wall", n=1)
+        r = Runner(workdir=self.workdir / "runner-unit-span", n=1)
         r.m01(0)  # four groups, one unit each
-        self.assertGreaterEqual(len(r.unit_wall), 4)
-        keys = set(r.unit_wall)
-        self.assertIn(("M01_legal_exec", "C2", "base"), keys)
-        self.assertIn(("M01_legal_exec", "B2", "base"), keys)
-        for v in r.unit_wall.values():
-            self.assertGreater(v, 0.0)
+        self.assertGreaterEqual(len(r.unit_observation), 4)
+        for key, (first, last) in r.unit_observation.items():
+            self.assertGreater(last, first, key)
+        self.assertIn(("M01_legal_exec", "C2", "base"), r.unit_observation)
+        self.assertIn(("M01_legal_exec", "B2", "base"), r.unit_observation)
         # The whole-run diagnostic is a separate value, not used per unit.
         self.assertIsNone(r.run_wall_seconds)
+
+    def test_r22_interleaved_unit_time_is_in_span(self):
+        """A 的首末 trial 之间有 B 执行 8s：A 的跨度是 last-first（含该间隔）。"""
+        from run_experiment import Runner
+        r = Runner(workdir=self.workdir / "runner-interleave", n=1)
+        a = ("S_A", "C2", "base")
+        b = ("S_B", "C2", "base")
+        rows = [
+            self._metric_row("S_A", "C2", "base", "NO_REFRESH_NEEDED", 1),
+            self._metric_row("S_A", "C2", "base", "NO_REFRESH_NEEDED", 1),
+        ]
+        b_row = self._metric_row("S_B", "C2", "base", "NO_REFRESH_NEEDED", 0)
+        # Each emit consumes one perf_counter value; _trial_t0 is set manually
+        # to emulate the trial start after harness setup.
+        with patch("run_experiment.time.perf_counter", side_effect=[1.0, 3.0, 10.0]):
+            r._instance_id = "i"
+            r._trial_t0 = 0.0
+            r.emit(rows[0], "EXECUTED")            # A first trial: (0, 1)
+            r._trial_t0 = 2.0
+            r.emit(b_row, "EXECUTED")              # B trial:      (2, 3)
+            r._trial_t0 = 9.0
+            r.emit(rows[1], "EXECUTED")            # A last trial: (0, 10)
+
+        self.assertEqual(r.unit_observation[a], (0.0, 10.0))
+        self.assertEqual(r.unit_observation[b], (2.0, 3.0))
+        by = {u["scenario_id"]: u for u in
+              compute_refresh_metrics(r.rows, r.unit_observation)["units"]}
+        # A: 2 attempts / 10s span, NOT 2/2s summed active time.
+        self.assertEqual(by["S_A"]["observation_wall_seconds"], 10.0)
+        self.assertEqual(by["S_A"]["refresh_attempt_count"], 2)
+        self.assertEqual(by["S_A"]["actual_refresh_request_rate"], 0.2)
+        # B has its own independent window: 0 attempts / 1s = 0.0.
+        self.assertEqual(by["S_B"]["observation_wall_seconds"], 1.0)
+        self.assertEqual(by["S_B"]["actual_refresh_request_rate"], 0.0)
+
+    def test_r22_unit_spans_are_independent(self):
+        """不同单元的 first/last 互不影响，请求率各按自身跨度计算。"""
+        rows = [
+            self._metric_row("A", "C2", "x", "REFRESH_SUCCESS", 1, 1.0, "i1"),
+            self._metric_row("B", "C2", "y", "REFRESH_SUCCESS", 3, 2.0, "i2"),
+        ]
+        obs = {("A", "C2", "x"): (0.0, 10.0), ("B", "C2", "y"): (2.0, 5.0)}
+        by = {(u["scenario_id"], u["arm"]): u for u in
+              compute_refresh_metrics(rows, obs)["units"]}
+        self.assertEqual(by[("A", "x")]["observation_wall_seconds"], 10.0)
+        self.assertEqual(by[("A", "x")]["actual_refresh_request_rate"], 0.1)
+        self.assertEqual(by[("B", "y")]["observation_wall_seconds"], 3.0)
+        self.assertEqual(by[("B", "y")]["actual_refresh_request_rate"], 1.0)
+
+    def test_r22_invalid_window_is_na_not_zero(self):
+        """缺失/非有限/非正的端点一律 NA，不返回 0。"""
+        rows = [self._metric_row("M01", "C2", "base", "NO_REFRESH_NEEDED", 1)]
+        key = ("M01", "C2", "base")
+        for window in (None, (5.0, 5.0), (8.0, 3.0),
+                       (float("nan"), 1.0), (0.0, float("inf"))):
+            obs = {} if window is None else {key: window}
+            u = compute_refresh_metrics(rows, obs)["units"][0]
+            self.assertEqual(u["observation_wall_seconds"], NA_NO_WALL)
+            self.assertEqual(u["actual_refresh_request_rate"], NA_NO_WALL)
 
 
 if __name__ == "__main__":

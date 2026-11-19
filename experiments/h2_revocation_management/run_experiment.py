@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 import tempfile
 import time
@@ -186,17 +187,19 @@ def _finalize(row: dict[str, Any], expected: str, raw: dict[str, Any]) -> None:
     raw["row"] = dict(row)
 
 
-# R2.1 / protocol §6.4: five independent actual-online-cost metrics, computed
-# PER EXPERIMENT UNIT (scenario_id + group + arm). Units are never merged.
-# Rationale (independent review R2.1): the runner interleaves all scenarios in
-# every repetition, so a single global wall duration would let B2/C0/C1 (and
-# every other scenario) inflate the C2 request-rate denominator, and summing
-# attempts across groups would no longer be "unit-internal actual attempts".
-# Statistical scope = C2 trials whose refresh_outcome is one of the four frozen
-# refresh classes (C2 actually ran the pre-exec refresh decision). Non-C2 groups
-# and C2 candidate-only rows (M07/M08/M09, refresh_outcome='NA') are excluded,
-# NOT counted as zero. Missing/uncomputable values use an explicit NA marker so
-# that absence is never silently reported as 0.
+# R2.2 / protocol §6.4: five independent actual-online-cost metrics, computed
+# PER EXPERIMENT UNIT (scenario_id + group + arm). Units are never merged:
+# neither attempt counts nor request rates are aggregated across units.
+# observation_wall_seconds follows the frozen definition literally:
+#   last_trial_end(perf_counter) - first_trial_start(perf_counter)
+# for that unit. Because the runner interleaves scenarios, this span includes
+# real wall time spent on other units between this unit's first and last trial;
+# that is the defined observation window (R2.2 aligns to the protocol instead
+# of substituting summed per-trial active time). The whole-run duration remains
+# diagnostic only. Statistical scope = C2 trials whose refresh_outcome is one
+# of the four frozen refresh classes. Non-C2 groups and C2 candidate-only rows
+# (M07/M08/M09, refresh_outcome='NA') are excluded, NOT counted as zero.
+# Missing/uncomputable values use an explicit NA marker, never 0.
 REFRESH_CLASSES = {
     "REFRESH_SUCCESS",
     "REFRESH_FAILED_STALE_CONTINUE",
@@ -217,7 +220,7 @@ def unit_key(row: dict[str, Any]) -> tuple[str, str, str]:
 
 def _unit_metrics(
     rows: list[dict[str, Any]],
-    wall_seconds: float | None,
+    window: tuple[float, float] | None,
 ) -> dict[str, Any]:
     """Five §6.4 metrics for ONE unit; no cross-unit aggregation here."""
     attempts = 0
@@ -240,9 +243,15 @@ def _unit_metrics(
         elif outcome in ("REFRESH_FAILED_STALE_CONTINUE", "REFRESH_FAILED_FAIL_CLOSED"):
             failures += 1
 
-    wall = (round(wall_seconds, 6)
-            if isinstance(wall_seconds, (int, float)) and wall_seconds > 0
-            else NA_NO_WALL)
+    # Protocol §6.4: observation span = last trial end - first trial start,
+    # measured with perf_counter for THIS unit only. A missing, non-finite or
+    # non-positive span is not a measurement and must stay NA (never 0).
+    wall = NA_NO_WALL
+    if (isinstance(window, (tuple, list)) and len(window) == 2
+            and all(isinstance(t, (int, float)) and not isinstance(t, bool)
+                    and math.isfinite(t) for t in window)
+            and window[1] > window[0]):
+        wall = round(window[1] - window[0], 6)
     unit: dict[str, Any] = {
         "trial_count": len(rows),
         "refresh_attempt_count": attempts,
@@ -250,8 +259,8 @@ def _unit_metrics(
         "refresh_failure_count": failures,
         "observation_wall_seconds": wall,
         "observation_wall_source": (
-            "sum of this unit's own per-trial perf_counter durations "
-            "(harness setup -> result row); other units' time excluded"
+            "perf_counter last_trial_end - first_trial_start for this unit "
+            "(includes real elapsed time of other units interleaved between)"
         ),
         "successful_refresh_interval_source": (
             "injected logical clock t_last_refresh_local, same execution "
@@ -285,14 +294,14 @@ def _unit_metrics(
 
 def compute_refresh_metrics(
     rows: list[dict[str, Any]],
-    unit_wall_seconds: dict[tuple[str, str, str], float] | None = None,
+    unit_observation: dict[tuple[str, str, str], tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Protocol §6.4 five metrics, reported per experiment unit.
 
-    ``unit_wall_seconds`` maps ``(scenario_id, group, arm)`` to that unit's own
-    measured wall duration. A single global run duration is NEVER accepted here:
-    it would put non-C2 execution time into the C2 denominator. ``None`` or a
-    missing key yields an explicit NA for that unit's rate.
+    ``unit_observation`` maps ``(scenario_id, group, arm)`` to
+    ``(first_trial_start, last_trial_end)`` measured by ``perf_counter`` for
+    that unit. The rate denominator is their difference, not summed active
+    time and never a whole-run duration. Missing/invalid endpoints yield NA.
     """
     grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for r in rows:
@@ -319,9 +328,9 @@ def compute_refresh_metrics(
         return result
 
     for key in sorted(grouped):
-        wall = None if unit_wall_seconds is None else unit_wall_seconds.get(key)
+        window = None if unit_observation is None else unit_observation.get(key)
         unit = {"scenario_id": key[0], "group": key[1], "arm": key[2]}
-        unit.update(_unit_metrics(grouped[key], wall))
+        unit.update(_unit_metrics(grouped[key], window))
         result["units"].append(unit)
     return result
 
@@ -332,9 +341,10 @@ class Runner:
         self.n = n
         self.rows: list[dict[str, Any]] = []
         self.raws: list[dict[str, Any]] = []
-        # R2.1: unit-scoped measured wall duration -> rate denominator. Keyed by
-        # (scenario_id, group, arm) so no other unit's time can enter it.
-        self.unit_wall: dict[tuple[str, str, str], float] = {}
+        # R2.2 / protocol §6.4: per-unit (first_start, last_end) perf_counter
+        # endpoints. The observation span is last_end - first_start, which
+        # includes real wall time of other units interleaved in between.
+        self.unit_observation: dict[tuple[str, str, str], tuple[float, float]] = {}
         self.run_wall_seconds: float | None = None  # diagnostic only, never a rate denominator
         self._trial_t0: float = 0.0
         self._instance_id: str = ""
@@ -354,14 +364,15 @@ class Runner:
         return h
 
     def emit(self, row: dict[str, Any], expected: str, **raw: Any) -> None:
-        # Charge this unit only for its own trial duration. The runner
-        # interleaves scenarios, so "first row to last row" across repetitions
-        # would include other units' execution time.
+        # Protocol §6.4 observation window for this unit: keep the FIRST trial's
+        # start and overwrite the LAST trial's end at every emit. Interleaved
+        # execution of other units is part of the real elapsed span by design.
+        start = self._trial_t0
         now = time.perf_counter()
-        elapsed = max(0.0, now - self._trial_t0)
         self._trial_t0 = now
         key = unit_key(row)
-        self.unit_wall[key] = self.unit_wall.get(key, 0.0) + elapsed
+        prior = self.unit_observation.get(key)
+        self.unit_observation[key] = (prior[0] if prior else start, now)
         row["_instance_id"] = self._instance_id
         _finalize(row, expected, raw)
         self.rows.append(row)
@@ -1097,7 +1108,7 @@ def write_outputs(outdir: Path, runner: Runner, n: int) -> dict[str, Any]:
         # R2.1 / protocol §6.4: actual online-cost metrics per experiment unit
         # (scenario_id + group + arm). Never 1/R, never a merged cross-unit rate.
         "refresh_cost_metrics": compute_refresh_metrics(
-            runner.rows, runner.unit_wall
+            runner.rows, runner.unit_observation
         ),
         # Diagnostic only; explicitly NOT used as a rate denominator.
         "run_wall_seconds": (
