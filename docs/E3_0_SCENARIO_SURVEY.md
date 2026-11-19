@@ -160,7 +160,7 @@ Gateway（缺独立逐调用集中策略门禁与跨 Server 统一视图）`[INF
 
 ### 3.7 可设计实验
 
-① 参数篡改（用户批准 `send_email(to=A)` 后途中改 `to=B`，digest 开关对照——但须先按 THREAT_MODEL C2 明确攻击者位于 TLS 终止之后的哪个信任边界，否则只是验证「签名能检测参数修改」）；② Rug pull（描述哈希 pin + 变更复审 vs 按名缓存审批）；③ 跨 Server shadowing（per-server 命名空间 + 用户意图绑定 vs 共享 registry）；④ Tool poisoning 外泄（复现 Invariant `add(sidenote)`，**如实记录出口签名无法阻断的负面结果**）；⑤ token passthrough / confused deputy（audience 校验对照）；⑥ D11 去重 + D10 预算（重放 `tools/call`、循环触发）。**强对照按 GO_NO_GO §4 的 A/B/C 三组设置**（A 普通 Host/HITL、B 精确参数审批+原子消费无密码学、C 独立授权方签名+一次性消费），并加入 MCPS 消息签名作扩展对照；记录检出率、重放成功率、并发重复消费率、可验证性与误拒率。
+① 参数篡改（用户批准 `send_email(to=A)` 后途中改 `to=B`，digest 开关对照——但须先按 THREAT_MODEL C2 明确攻击者位于 TLS 终止之后的哪个信任边界，否则只是验证「签名能检测参数修改」）；② Rug pull（描述哈希 pin + 变更复审 vs 按名缓存审批）；③ 跨 Server shadowing（per-server 命名空间 + 用户意图绑定 vs 共享 registry）；④ Tool poisoning 外泄（复现 Invariant `add(sidenote)`，**如实记录出口签名无法阻断的负面结果**）；⑤ token passthrough / confused deputy（audience 校验对照）；⑥ D11 去重 + D10 预算（重放 `tools/call`、循环触发）。**强对照按 GO_NO_GO §4.1 的 A / B1 / B2 / C 四组设置**（A 普通 Host/HITL；B1 共享信任域基线=普通审批+共享状态原子消费，能力上限、**非 C 的直接密码学对照**；B2 跨信任域非密码学基线=可信通道查询/共同托管，**唯一有密码学归因价值的对照**；C 独立授权方签名+本地验签+一次性消费），并加入 MCPS 消息签名作扩展对照；记录检出率、重放成功率、并发重复消费率、可验证性与误拒率。**只有 B2 vs C 的差异可归因于密码学凭证；且须控制 B2 与 C 的授权有效期、撤销语义、消费保证等价，否则展示的是离线验证 vs 在线查询的架构权衡（见 RESEARCH_GAP §5）**。
 
 ### 3.8 相关工作（★E3-0.1 新增：不能只与「无 Binding MCP」比较）
 
@@ -188,9 +188,9 @@ Gateway（缺独立逐调用集中策略门禁与跨 Server 统一视图）`[INF
 | Binding 有效性前提 | 需授权方≠执行方 | SQL 文本能否提取授权语义待验证 | **需绑定用户意图而非模型输出** |
 | 最危险风险 | 注入→读取/外泄、策略绕过 | 合法权限内生成泄露性 SQL（Binding 无效） | tool poisoning / shadowing（推理侧，出口签名错位） |
 | 一手攻击证据 | CamoLeak、CVE-2025-62453、AgentDojo ASR | P2SQL (ICSE'25)、arXiv:2211.15363、ToxicSQL | Invariant tool poisoning、CVE-2025-49596、arXiv:2503.23278 |
-| 对框架适配性 | 中（重复度高，需独立信任边界才成立） | 中（DB 层已强，Binding 对 SQL 语义存疑） | **相对最高**（规范无 token↔tool+参数绑定是事实、注入点明确；但相关工作已多，须靠 A/B/C 强对照证明增量） |
+| 对框架适配性 | 中（重复度高，需独立信任边界才成立） | 中（DB 层已强，Binding 对 SQL 语义存疑） | **相对最高**（规范无 token↔tool+参数绑定是事实、注入点明确；但相关工作已多，须靠 A/B1/B2/C 强对照、且仅以 B2 vs C 归因密码学增量） |
 
-**初判（待后续威胁模型与差距分析确认）**：MCP 场景仍相对优先，但**不再因为「arguments_digest 是唯一规范空白」**——参数级审批（OWASP Cheat Sheets）与消息签名/防重放（MCPS）已有相关工作。真正的研究问题是「独立授权方的动作批准能否成为跨信任边界可验证、不可替换/重放的一次性凭证」。三场景共同的关键约束：Binding 必须绑定**用户确认的具体动作**而非**模型输出参数**，否则注入产生的恶意参数会被合法签名；且须证明 C 组相对 B 组（普通应用层审批）有可测增量。这些将在 `E3_0_RESEARCH_GAP.md` 与 `E3_0_GO_NO_GO.md` 中展开。
+**初判（待后续威胁模型与差距分析确认）**：MCP 场景仍相对优先，但**不再因为「arguments_digest 是唯一规范空白」**——参数级审批（OWASP Cheat Sheets）与消息签名/防重放（MCPS）已有相关工作。真正的研究问题是「独立授权方的动作批准能否成为跨信任边界可验证、不可替换/重放的一次性凭证」。三场景共同的关键约束：Binding 必须绑定**用户确认的具体动作**而非**模型输出参数**，否则注入产生的恶意参数会被合法签名；且须证明 **C 组相对 B2（跨信任域非密码学基线）有可测且可归因的增量**——B1（共享信任域审批）只是能力上限，不是 C 的直接密码学对照。这些将在 `E3_0_RESEARCH_GAP.md` 与 `E3_0_GO_NO_GO.md` 中展开。
 
 ---
 
