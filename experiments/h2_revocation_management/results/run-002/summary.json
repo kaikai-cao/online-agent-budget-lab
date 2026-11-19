@@ -1,0 +1,100 @@
+{
+  "experiment": "H2.2 parameter-coverage supplement (run-002)",
+  "run_id": "run-002",
+  "mode": "param-sweep",
+  "n_per_cell": 10,
+  "total_trials": 40,
+  "passed_trials": 40,
+  "failed_trials": 0,
+  "all_pass": true,
+  "refresh_cost_metrics": {
+    "scope": "per unit (scenario_id + group + arm); C2 trials with refresh_outcome in the four frozen refresh classes; non-C2 groups and candidate-only rows excluded (not counted as 0)",
+    "unit_key": "scenario_id + group + arm",
+    "unit_count": 2,
+    "applicable_trial_count": 20,
+    "units": [
+      {
+        "scenario_id": "M14_head_to_head",
+        "group": "C2",
+        "arm": "intermittent_pathA_R=120",
+        "trial_count": 10,
+        "refresh_attempt_count": 10,
+        "refresh_success_count": 10,
+        "refresh_failure_count": 0,
+        "observation_wall_seconds": 13.424177,
+        "observation_wall_source": "perf_counter last_trial_end - first_trial_start for this unit (includes real elapsed time of other units interleaved between)",
+        "successful_refresh_interval_source": "injected logical clock t_last_refresh_local, same execution instance only (a fresh harness restarts the logical clock)",
+        "actual_refresh_request_rate": 0.744925,
+        "successful_refresh_interval": "NA_NO_CONTINUOUS_LOGICAL_CLOCK"
+      },
+      {
+        "scenario_id": "M14_head_to_head",
+        "group": "C2",
+        "arm": "intermittent_pathA_R=5",
+        "trial_count": 10,
+        "refresh_attempt_count": 10,
+        "refresh_success_count": 10,
+        "refresh_failure_count": 0,
+        "observation_wall_seconds": 13.245694,
+        "observation_wall_source": "perf_counter last_trial_end - first_trial_start for this unit (includes real elapsed time of other units interleaved between)",
+        "successful_refresh_interval_source": "injected logical clock t_last_refresh_local, same execution instance only (a fresh harness restarts the logical clock)",
+        "actual_refresh_request_rate": 0.754962,
+        "successful_refresh_interval": "NA_NO_CONTINUOUS_LOGICAL_CLOCK"
+      }
+    ]
+  },
+  "run_wall_seconds": 14.974533,
+  "meta": {
+    "action_domain": "h1-action-binding-v1",
+    "snapshot_domain": "h2-revocation-snapshot-v1",
+    "b2_transport": "real localhost TLS with pinned server cert fingerprint",
+    "c2_snapshot_format": "signed cumulative revocation set, versioned, HWM persisted",
+    "time_system": "injected logical clock for windows; perf_counter for costs only",
+    "expected_outcome_is_assertion_only": true,
+    "actual_outcomes_observed": true,
+    "refresh_metric_unit": "scenario_id + group + arm (units never merged)",
+    "run_wall_seconds_scope": "diagnostic only; not a request-rate denominator",
+    "synthetic_cost_note": "single execution per trial => refresh_attempts<=1 for every R; actual_refresh_request_rate here is 1 attempt per observation span and does NOT measure sustained per-R request cost (no continuous-execution scenario introduced; that would be a new experiment design)"
+  },
+  "supplement_of": "run-001",
+  "does_not_rerun_run001_units": true,
+  "parameter_grid": {
+    "C1_tau_s": {
+      "run_001": [
+        5,
+        60
+      ],
+      "run_002_added": [
+        15
+      ],
+      "complete": [
+        5,
+        15,
+        60
+      ]
+    },
+    "C2_R_s": {
+      "run_001": [
+        30
+      ],
+      "run_002_added": [
+        5,
+        120
+      ],
+      "complete": [
+        5,
+        30,
+        120
+      ]
+    },
+    "C2_S_s": 120,
+    "A_s": 60,
+    "n_per_cell": 10
+  },
+  "added_units": [
+    "M14_head_to_head / C2 / intermittent_pathA_R=5",
+    "M14_head_to_head / C2 / intermittent_pathA_R=120",
+    "M02_offline_exec / C1 / tau=15",
+    "M03_offline_expired / C1 / tau=15"
+  ]
+}
