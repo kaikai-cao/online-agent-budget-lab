@@ -1,0 +1,17 @@
+{
+  "experiment": "H1 minimum feasibility - B2 online vs C local credential",
+  "total_checks": 29,
+  "passed_checks": 29,
+  "failed_checks": 0,
+  "all_pass": true,
+  "meta": {
+    "action_domain": "h1-action-binding-v1",
+    "digest": "sha256 over canonical action identity fields",
+    "b2_transport": "real localhost TLS with certificate pinning",
+    "b2_fails_closed": true,
+    "c_trust_anchor": "pre-configured Ed25519 public key by key_id",
+    "shared_consumption_store": true,
+    "consume_and_effect_same_transaction": true,
+    "not_exactly_once_for_third_party": true
+  }
+}

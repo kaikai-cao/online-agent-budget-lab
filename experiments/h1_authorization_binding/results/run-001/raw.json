@@ -1,0 +1,232 @@
+[
+  {
+    "scenario": "legal_allow",
+    "b2": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "c": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "effects_b2": 1,
+    "effects_c": 1,
+    "expect_b2": "EXECUTED",
+    "expect_c": "EXECUTED"
+  },
+  {
+    "scenario": "tamper_arguments",
+    "b2": {
+      "outcome": "REJECTED",
+      "reason": "B2_DENIED:ACTION_DIGEST_MISMATCH"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "ACTION_DIGEST_MISMATCH"
+    },
+    "effects_b2": 0,
+    "effects_c": 0,
+    "expect_b2": "REJECTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "tamper_schema",
+    "b2": {
+      "outcome": "REJECTED",
+      "reason": "B2_DENIED:ACTION_DIGEST_MISMATCH"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "ACTION_DIGEST_MISMATCH"
+    },
+    "effects_b2": 0,
+    "effects_c": 0,
+    "expect_b2": "REJECTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "tamper_server_uri",
+    "b2": {
+      "outcome": "REJECTED",
+      "reason": "B2_DENIED:ACTION_DIGEST_MISMATCH"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "ACTION_DIGEST_MISMATCH"
+    },
+    "effects_b2": 0,
+    "effects_c": 0,
+    "expect_b2": "REJECTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "executor_mismatch",
+    "b2": {
+      "outcome": "REJECTED",
+      "reason": "EXECUTOR_TARGET_MISMATCH"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "EXECUTOR_TARGET_MISMATCH"
+    },
+    "effects_b2": 0,
+    "effects_c": 0,
+    "expect_b2": "REJECTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "expired_authorization",
+    "b2": {
+      "outcome": "REJECTED",
+      "reason": "B2_DENIED:EXPIRED"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "C_EXPIRED"
+    },
+    "effects_b2": 0,
+    "effects_c": 0,
+    "expect_b2": "REJECTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "revoked_b2_denies",
+    "b2": {
+      "outcome": "REJECTED",
+      "reason": "B2_DENIED:REVOKED"
+    },
+    "c": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "effects_b2": 0,
+    "effects_c": 1,
+    "expect_b2": "REJECTED",
+    "expect_c": "EXECUTED"
+  },
+  {
+    "scenario": "credential_tamper",
+    "b2": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "C_SIGNATURE_INVALID"
+    },
+    "effects_b2": 1,
+    "effects_c": 0,
+    "expect_b2": "EXECUTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "auth_service_unreachable",
+    "b2": {
+      "outcome": "REJECTED",
+      "reason": "B2_DENIED:AUTH_SERVICE_UNREACHABLE"
+    },
+    "c": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "effects_b2": 0,
+    "effects_c": 1,
+    "expect_b2": "REJECTED",
+    "expect_c": "EXECUTED"
+  },
+  {
+    "scenario": "c_unknown_key_id",
+    "b2": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "C_UNKNOWN_KEY_ID"
+    },
+    "effects_b2": 1,
+    "effects_c": 0,
+    "expect_b2": "EXECUTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "c_wrong_audience",
+    "b2": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "C_BAD_AUDIENCE"
+    },
+    "effects_b2": 1,
+    "effects_c": 0,
+    "expect_b2": "EXECUTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "c_wrong_issuer",
+    "b2": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "c": {
+      "outcome": "REJECTED",
+      "reason": "C_BAD_ISSUER"
+    },
+    "effects_b2": 1,
+    "effects_c": 0,
+    "expect_b2": "EXECUTED",
+    "expect_c": "REJECTED"
+  },
+  {
+    "scenario": "replay_sequential",
+    "first": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "second": {
+      "outcome": "DEDUP_HIT",
+      "reason": "OK"
+    },
+    "effects": 1
+  },
+  {
+    "scenario": "replay_concurrent",
+    "executed": 1,
+    "effects": 1,
+    "outcomes": {
+      "DEDUP_HIT": 7,
+      "EXECUTED": 1
+    }
+  },
+  {
+    "scenario": "crash_rollback",
+    "rollback": {
+      "outcome": "ROLLED_BACK",
+      "reason": "OK"
+    },
+    "retry": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "replay": {
+      "outcome": "DEDUP_HIT",
+      "reason": "OK"
+    },
+    "effects": 1
+  },
+  {
+    "scenario": "planner_forged_digest",
+    "b2": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "c": {
+      "outcome": "EXECUTED",
+      "reason": "OK"
+    },
+    "effects_b2": 1,
+    "effects_c": 1
+  }
+]
