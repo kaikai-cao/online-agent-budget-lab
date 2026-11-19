@@ -3,6 +3,7 @@
 > **阶段性质**：研究与威胁建模，暂不开发、不接入、不提交。
 > **依据**：`E3_0_SCENARIO_SURVEY.md` 的三场景调研与一手来源。标签 `[FACT]` / `[INFER]` / `[ASSUMPTION]` 同前。
 > **核心纪律**：威胁必须锚定真实 Agent 工具调用链；**Prompt Injection 的存在不等于本框架能解决它**；E2 受控实验结论不外推为真实 Agent 上已成立的安全保证。
+> **★E3-0.1 修订（重要）**：C2「在途参数篡改」原表述过于笼统——TLS 已提供传输完整性，普通网络攻击者无法修改已受 TLS 保护的 MCP 请求。本版明确 C2 攻击者位于 **TLS 终止之后**的具体信任边界，标注其为**实验构造能力而非已观察现实攻击**，并要求说明为什么 TLS、Host 审批与 MCP Server 输入校验都不能解决它、授权签名方与执行验证方如何真正独立。否则实验只能证明「数字签名能检测参数修改」，而非一个真实 Agent 安全问题。
 
 ---
 
@@ -63,7 +64,13 @@ LLM / Planner  →  工具调用请求 (tool_name, arguments)
 按能力递增分层，明确每层对应哪些真实证据：
 
 - **C1 内容注入者** `[FACT]`：能在 PR 描述 / issue / DB 记录 / 工具 description 中放置恶意文本，诱导 Planner 产生非预期工具调用。证据：CamoLeak、P2SQL 间接注入、Invariant tool poisoning。
-- **C2 参数篡改者（在途）** `[ASSUMPTION]`：能在 Planner→执行边界之间修改 tool_name / arguments。真实 Agent 中此能力**尚无一手实证**，是实验需构造的假设能力——若现实中不存在该能力，Binding 的实验价值下降（见 GO/NO-GO）。
+- **C2 参数篡改者（TLS 终止之后）** `[ASSUMPTION]`：**不是**网络传输中的普通攻击者——TLS 已为 MCP 请求提供传输完整性，线路窃听/中间人不能修改已受保护的请求（MCPS §1.2 亦明示 MCP-over-HTTP 靠 TLS 提供传输机密性）。C2 必须是**在 TLS 终止之后**能改写的主体，位于以下某个具体信任边界（须在实验中明确选其一并论证真实性）：
+  - (a) **被攻陷的 Host / Client  middleware**：`tools/call` 在被签名批准之后、发出之前，于 Host 内部被改写；
+  - (b) **不可信的工具路由 / 网关组件**：多 Agent 委派或代理链中，中间执行方改写下游调用参数；
+  - (c) **被篡改的本地执行链**：stdio 传输下 host 与 server 之间的本地进程被控制。
+  - **定位** `[ASSUMPTION]`：以上能力在真实 Agent 中的普遍性**尚无一手实证**，属实验构造能力；若只能人为构造，研究价值降为「机制验证」而非「真实威胁防护」。
+  - **为什么现有机制不能解决** `[FACT/INFER]`：TLS 只保护传输、不保护 TLS 终止后的端内数据；Host 的 HITL 确认在 2026-07-28 tools 页是 SHOULD 级建议且确认的是「工具名/意义」而非生效参数，审批后参数变更在 OWASP Cheat Sheet 中要求重新批准但多数实现未强制；MCP Server 输入校验只做 schema/类型校验、不校验语义合法性。OWASP MCP 安全指南专门讨论 TLS 终止后的消息完整性，并指出 MCP 核心传输规范不要求每条 JSON-RPC 消息都签名。[^M1][^W1]
+  - **独立性要求** `[ASSUMPTION]`：授权签名方（可信授权服务/用户界面）与执行验证方（Gateway/Executor）必须在不同信任域；若同一主体既签又验，C2 能同时改写两者，机制失效。
 - **C3 越权调用者** `[FACT]`：利用过宽 scope / confused deputy 调用本不应调用的工具或参数。证据：MCP02 scope creep、CVE-2025-49596。
 - **C4 重放/重试者** `[FACT]`：能触发同一 `tools/call` 的重复执行（网络超时重试、at-least-once runtime）。证据：工程实践中 at-least-once 重试导致重复副作用；MCP 规范无幂等强制机制 `[ASSUMPTION]`。
 - **C5 记录篡改者 / 内部威胁** `[INFER]`：能修改 agent 自身产生的日志或 harness 状态。若验证方与被验证方同一信任域，独立性失效——这是 Journal/Receipt 价值的前提条件。
@@ -79,9 +86,9 @@ LLM / Planner  →  工具调用请求 (tool_name, arguments)
 恶意文本存于 PR 描述或 DB 记录 → 被查询/读取回灌 Planner → Planner 产生外泄型工具调用（如读取 SSH key 经 `sidenote` 外传）→ 执行边界放行（因调用「看起来合法」）。`[FACT]` CamoLeak、P2SQL RI.1/RI.2、Invariant `add(sidenote)`。
 **框架覆盖判断** `[INFER]`：**不覆盖根因**。Binding 签的是模型输出参数，注入产生的恶意参数会被合法签名；只有出口策略（若定义了敏感参数禁止规则）可能拦下部分外泄，但这属于 Gateway 策略而非 Binding 的密码学保证。
 
-### AP-2 在途参数篡改（TB2）
-用户批准 `send_email(to=A)` → 攻击者将 arguments 改为 `to=B` → 执行边界若无绑定则放行。`[ASSUMPTION]` 现实中此能力需构造（C2）。
-**框架覆盖判断** `[FACT/INFER]`：这是 `arguments_digest` 的**目标威胁**。若授权签名在篡改前生成、执行前校验 digest，则篡改被拒。但前提是签名对象是**用户授权意图 A1**且授权方与执行方分离；若签的是模型输出参数，AP-1 下无效。
+### AP-2 TLS 终止后的参数篡改（TB2，C2）
+用户经可信授权界面确认具体动作 `send_email(to=A)` → 独立授权服务签发一次性凭证（绑定规范化参数）→ **在 TLS 终止之后**，被攻陷的 Host middleware / 不可信路由 / 本地执行链将生效 arguments 改为 `to=B`（C2 的 (a)/(b)/(c) 之一）→ 执行方若无凭证校验则按 `to=B` 放行。`[ASSUMPTION]` 此攻击能力为实验构造，须明确攻击者所在信任边界并论证现实性；不是线路中间人（TLS 已保护传输）。
+**框架覆盖判断** `[FACT/INFER]`：这是一次性授权凭证 + 参数绑定的**目标威胁**。若凭证在篡改前签发、执行方跨信任域校验参数摘要并原子消费，则篡改被拒。但三个前提缺一不可：①签名对象是**用户确认的具体动作 A1**而非模型输出参数（否则 AP-1 下无效）；②授权方与执行验证方处于**不同信任域**（否则 C2 可同时改写两边）；③校验发生在**TLS 终止之后、副作用提交之前**的执行边界。若只证明「签名能检测参数变化」而未满足以上三点，则实验价值有限。
 
 ### AP-3 越权 / confused deputy（TB3）
 过宽 scope 或 token passthrough → MCP Server 以错误的 authority 调用下游 → 下游误信。`[FACT]` MCP02、token passthrough 禁令（规范原文已核实）。
@@ -120,4 +127,11 @@ agent 自身日志被篡改或缺失 → 无法追责。`[FACT]` OWASP MCP08（b
 2. **注入 ≠ 可解决** `[FACT]`：P2SQL §5.1.4 明确指出辅助 LLM Guard 属检测型、可被绕过；AgentDojo/ChatInject 显示 prompt 防御基本无效。本框架不解决注入根因，只约束执行侧。
 3. **E2 不外推** `[FACT]`：E2.1/E2.2/E2.3 的 N=10 受控结论证明的是机制可行性，不是真实 Agent 上已成立的安全保证；真实验证需重新设计实验（见 RESEARCH_GAP / GO_NO_GO）。
 4. **独立性前提** `[INFER]`：Journal/Receipt 的独立性价值仅在「验证方与执行方不同信任域」时成立；同域内签名无额外保证。
-5. **在途篡改能力待证** `[ASSUMPTION]`：C2 是 Binding 正向实验的核心假设，真实 Agent 中是否存在该能力需在 E3 实验中明确构造并标注为实验假设，不得写成已观察到的事实。
+5. **在途篡改能力待证** `[ASSUMPTION]`：C2 是正向实验的核心假设，但**不是线路中间人**——TLS 已保护传输完整性。真实 Agent 中必须明确攻击者位于 TLS 终止之后的哪个信任边界（被攻陷 Host middleware / 不可信工具路由 / 本地执行链），并说明为何 TLS、Host HITL（SHOULD 级）、MCP Server 输入校验都不能解决。该能力须在 E3 实验中明确构造并标注为实验假设，不得写成已观察到的事实；否则实验只能证明「数字签名能检测参数修改」。[^M1][^W1]
+6. **消息签名 ≠ 用户批准** `[FACT]`：MCPS 逐消息签名（含 `tools/call` name/arguments）证明「消息由谁发、是否被改」，但其 §1.2 明示 "does not replace OAuth-based access control"、§11.2 明示提供 provenance 而非 safety analysis。**Agent 可以合法签署一条恶意工具调用**——消息完整性不自动等于该调用经过用户授权。本威胁模型不得把 MCPS 的消息签名当作授权保证，也不得把本方向的一次性授权凭证当作消息完整性机制。[^W4]
+
+## 来源补充（E3-0.1）
+
+[^M1]: MCP Specification 2026-07-28, "Tools" / "Security Best Practices" — modelcontextprotocol.io/specification/2026-07-28/server/tools（human-in-the-loop 为 SHOULD；annotations MUST 不可信；"MCP itself cannot enforce these security principles at the protocol level"）
+[^W1]: OWASP Cheat Sheet Series, "AI Agent Security Cheat Sheet" — cheatsheetseries.owasp.org/cheatsheets/AI_Agent_Security_Cheat_Sheet.html（§1 Tool Authorization Middleware：user_confirmed 不足、target/参数变更需重新批准、执行前原子消费）
+[^W4]: R. Sharif, "MCPS: Cryptographic Security Layer for the Model Context Protocol", `draft-sharif-mcps-secure-mcp-01`, 2026-08-21 — datatracker.ietf.org/doc/draft-sharif-mcps-secure-mcp/（个人 Internet-Draft，非已采纳标准；§1.2、§11.2 逐字核实）

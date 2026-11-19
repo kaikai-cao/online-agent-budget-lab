@@ -4,7 +4,8 @@
 > **目标**：找到一个真实存在、可复现、且确实需要 E1/E2 可信执行机制的 Agent 工具调用场景，并判断现有框架是否值得接入。
 > **方法**：调研官方文档、真实代码仓库、原始论文与安全公告；每项判断标注 `[FACT]` 已证实 / `[INFER]` 合理推测 / `[ASSUMPTION]` 待验证假设。
 > **核心纪律**：不预设哪个场景最好；不把「Prompt Injection 存在」等同于「本方案能解决它」；不把 E2 受控实验结果写成真实 Agent 上已成立的安全保证；单纯把 Gateway 接到某框架不构成研究创新。
-> **证据核对时间**：2026-11。关键一手来源已二次核实（见各节脚注与文末来源清单）。
+> **证据核对时间**：2026-11（E3-0.1 于同月修订）。关键一手来源已二次核实（见各节脚注与文末来源清单）。
+> **★E3-0.1 修订**：MCP 规范版本从 2025-06-18 更新为 **2026-07-28**（Server 级 `resource` 语义与无 tool+参数绑定仍成立）；Tools 页 human-in-the-loop 为 **SHOULD** 级建议而非 MUST；「stateless」表述改为「无协议级跨调用状态与幂等保证，但允许 Server 通过显式 handle 在应用层管理状态」；补充 OWASP 两份 Cheat Sheet 与 MCPS draft 相关工作，论证重心从「arguments_digest 是规范空白」调整为「独立授权凭证跨信任域的可验证性与一次性消费」。
 
 ---
 
@@ -13,7 +14,7 @@
 对我们框架（Gateway / Request Binding `arguments_digest` / D10 预算准入 / D11 状态转移 / Receipt / Journal）而言，只有满足以下条件的场景才值得进入 E3：
 
 1. **存在独立信任边界**：授权决策方与工具执行方分离，或执行方不可信/可被攻陷。若同进程自签自验，密码学绑定无额外保证 `[INFER]`。
-2. **缺口是结构性的**：现有框架/协议已覆盖的部分不重复建设；只补「授权意图 ↔ 具体 tool + 具体参数」的密码学绑定、独立权威记录、确定性状态与恢复等真实空白。
+2. **缺口是结构性的**：现有框架/协议已覆盖的部分不重复建设；只补「独立授权方的动作批准 ↔ 跨信任边界可验证的一次性凭证」、独立权威记录、确定性状态与恢复等待证缺口。**注意**：参数级审批原则（OWASP Cheat Sheets）与消息签名/防重放（MCPS）已有相关工作，「给 MCP 加 arguments_digest」本身不是创新（见 §3.8、RESEARCH_GAP §5）。
 3. **攻击可复现且有对照**：能设计「无框架基线 vs 启用框架」的可复现实验，且能量化检出率与误拒率（可用性代价）。
 4. **差异可归因**：实验成功必须来自执行侧的绑定/门禁，而非「注入被偶然挡住」。
 
@@ -115,30 +116,31 @@ Binding + `arguments_digest`（绑定 tool + 参数含 SQL 文本，防参数篡
 
 ### 3.1 真实框架与工具调用链 `[FACT]`
 
-真实生态为 Host → 多个 Client → 各自 Server 的星型结构；工具调用是 JSON-RPC 2.0 的 `tools/list` → `tools/call` 两阶段。传输层现为 stdio + Streamable HTTP（SSE 已并入 Streamable HTTP）。`tools/call.params.name` 必须与发现响应精确匹配，`arguments` 按 `inputSchema` 填写；Host 合并所有 Server 工具为统一 registry，LLM 依描述选择，Host 拦截后路由。真实产品如 AWS MCP Server（2025-11 预览，覆盖 15000+ AWS API，IAM 鉴权 + CloudTrail 审计）。[^M1][^M2]
+真实生态为 Host → 多个 Client → 各自 Server 的星型结构；工具调用是 JSON-RPC 2.0 的 `tools/list` → `tools/call` 两阶段。传输层现为 stdio + Streamable HTTP（SSE 已并入 Streamable HTTP）。`tools/call.params.name` 必须与发现响应精确匹配，`arguments` 按 `inputSchema` 填写；Host 合并所有 Server 工具为统一 registry，LLM 依描述选择，Host 拦截后路由。真实产品如 AWS MCP Server（2025-11 预览，覆盖 15000+ AWS API，IAM 鉴权 + CloudTrail 审计）。**规范版本已更新至 2026-07-28**（本轮核对版本；该版新增 Extensions 概念与 per-request capability negotiation，Server 级 `resource` 语义与无 tool+参数 token 绑定仍成立）。[^M1][^M2]
 
 `[INFER]` Gateway 放在 Client↔Server 之间在协议上可截获 `tools/list`/`tools/call`，但会改变 OAuth audience 归属，需作为资源方重新设计。
 
 ### 3.2 LLM 能否决定工具名与参数 `[FACT]`
 
-能，且是 MCP 设计意图（"Tools are designed to be model-controlled"）。`inputSchema` 是 JSON Schema（默认 2020-12，MUST 是合法 object），仅做结构与类型校验，不校验语义。规范明确：工具 annotations/descriptions 除非来自可信 Server 否则客户端 MUST 视为不可信；"MCP itself cannot enforce these security principles at the protocol level"。[^M2]
+能，且是 MCP 设计意图（"Tools are designed to be model-controlled"）。`inputSchema` 是 JSON Schema（默认 2020-12，MUST 是合法 object），仅做结构与类型校验，不校验语义。规范明确：工具 annotations/descriptions 除非来自可信 Server 否则客户端 MUST 视为不可信；"MCP itself cannot enforce these security principles at the protocol level"。[^M2] 新版 2026-07-28 tools 页原文：human in the loop 为 **SHOULD**（"there SHOULD always be a human in the loop with the ability to deny tool invocations"），confirmation prompts 列为 Applications SHOULD 项——**不是协议 MUST 强制**，不可写成强制门禁。
 
 `[INFER]` schema 合法 ≠ 意图合法：被注入后生成的参数仍是 schema 合法值。这是 Binding 最直接的切入点，但**若只绑定「LLM 最终产生的参数」，注入产生的恶意参数同样会被合法签名**——必须绑定「用户授权意图」。
 
 ### 3.3 执行前的独立授权检查 `[FACT]`
 
-有 OAuth 授权但**粒度是 Server 级/粗 scope，不是 tool + 参数级**（本次已二次核实规范原文）：
-- 授权是 OPTIONAL；HTTP transport SHOULD 遵循、stdio SHOULD NOT（从环境取凭据）。
+有 OAuth 授权但**粒度是 Server 级/粗 scope，不是 tool + 参数级**（2026-07-28 版原文已二次核实）：
 - `resource` 参数（RFC 8707）MUST 标识「the MCP server that the client intends to use the token with」、MUST 用 server 的 canonical URI（如 `https://mcp.example.com/mcp`）——**绑定对象是整个 MCP Server，不是具体 tool + 参数**。[^M1]
-- Token passthrough 明令禁止（MUST NOT），原因是 confused deputy；Session ID 不得用于认证，须绑定 user id。[^M4]
-- "Hosts must obtain explicit user consent before invoking any tool"；"there SHOULD always be a human in the loop with the ability to deny tool invocations"。[^M2]
+- Token passthrough / 非本 Server audience 的 token 明令禁止（MUST NOT send / MUST NOT accept or transit；Security Considerations 将 confused deputy 列为 MUST 遵循的安全主题）。[^M1][^M4]
+- 新版 tools 页："For trust & safety and security, there SHOULD always be a human in the loop with the ability to deny tool invocations"，confirmation prompts 为 Applications SHOULD；主页 Key Principles 有 "Hosts must obtain explicit user consent before invoking any tool" 的表述（原则层 must，非 tools 页强制门禁）。[^M1][^M2]
 
-`[FACT]` 规范中不存在把 token 绑定到具体 tool + 具体 arguments（更无 arguments digest）的机制——**这是本框架 arguments_digest 的确证空白**。`[INFER]` 但「谁判定权限」现有已是 Server（OAuth）与用户（HITL），Gateway 是新增第三方判定者，需明确信任锚。
+`[FACT]` 规范中不存在把 token 绑定到具体 tool + 具体 arguments（更无 arguments digest）的机制。**须严格区分一处易混表述** `[FACT]`：2026-07-28 authorization 页出现 "The required scopes may be determined dynamically based on the specific request arguments and context, but once determined, they should be emitted together."——这是 **Server 在 challenge 中动态决定返回哪些 scope**，不是「token 绑定到具体参数」，不得据此声称规范已支持参数级绑定。
+
+`[FACT/INFER]` 规范空白是事实，但**不等于研究创新**：OWASP Agent Security / Transaction Authorization Cheat Sheet 已提出精确动作审批与原子消费，MCPS draft 已提供消息签名与防重放（见 §3.8）。本方向的重心是「独立授权方签发的动作批准凭证能否跨信任域验证并一次性消费」。`[INFER]` 「谁判定权限」现有已是 Server（OAuth）与用户（HITL，SHOULD），Gateway 是新增第三方验证者，需明确信任锚。
 
 ### 3.4 风险证据 `[FACT] + [ASSUMPTION]`
 
 - **Invariant Labs（2025-04）**：恶意 `add` 工具在隐藏 description 中指示读取 `~/.cursor/mcp.json`、`~/.ssh/id_rsa` 并经 `sidenote` 外传，Cursor 确认框未展示完整参数；**Rug pull**（批准后服务端改描述）、**跨 Server tool shadowing**（恶意描述改写可信 `send_email` 收件人，用户仍以为调用可信工具）。[^M5]
-- **OWASP MCP Top 10（2025 beta，Phase 3）**：MCP01 令牌管理、MCP02 scope creep、MCP03 Tool Poisoning、MCP04 供应链、MCP05 命令注入、MCP06 上下文 Prompt Injection、MCP07 认证授权不足、MCP08 Lack of Audit and Telemetry（原文要求 "immutable audit trails"）、MCP09 Shadow Servers、MCP10 上下文过度共享。[^M3]
+- **OWASP MCP Top 10（2025 beta，Phase 3）**：MCP01 令牌管理、MCP02 scope creep、MCP03 Tool Poisoning、MCP04 供应链、MCP05 命令注入、MCP06 上下文 Prompt Injection、MCP07 认证授权不足、MCP08 Lack of Audit and Telemetry（原文建议 "immutable audit trails"）、MCP09 Shadow Servers、MCP10 上下文过度共享。**定位说明** `[FACT]`：MCP Top 10 仍标注 beta，MCP08 是**安全实践建议、非 MCP 协议强制要求**；OWASP 另已推荐结构化日志、完整工具调用参数记录、日志完整性保护与集中式审计，因此 Receipt+Journal 不能仅以「现有日志不可信」立论。[^M3]
 - **CVE-2025-49596**：MCP Inspector <0.14.1 客户端与 proxy 间缺认证，未认证请求可经 stdio 启动任意命令 → RCE，CVSS 9.4，CWE-306（**二手转引，需以 NVD 原条目核实** `[ASSUMPTION]`）。[^M6]
 - arXiv:2503.23278（4 类攻击者、16 威胁场景）、arXiv:2504.03767（实测恶意代码执行、凭据窃取）。[^M7]
 
@@ -150,13 +152,27 @@ OAuth audience 校验、token passthrough 禁令、per-client consent、consent 
 
 `[ASSUMPTION]` 未找到 OpenAI/Anthropic 在协议层提供「按 tool+参数签名的授权 receipt」的证据，需进一步核实其 Agents SDK / Claude Code 实现。
 
+**stateless 的准确表述** `[FACT]`：MCP 2026-07-28 主页 Key Details 写 "Stateless, self-contained requests / Per-request capability negotiation"，核心协议无协议级隐式跨调用 Session State；但规范**明确允许 Server 通过显式 handle 在应用层管理状态**（如 Tasks 扩展的 durable handles、server/discover 的 capability 声明）。因此正确说法是「**MCP 不提供通用的协议级跨调用事务状态与幂等保证，但允许 Server 通过应用层机制管理状态**」，而非「协议完全没有跨调用状态机制」。
+
 ### 3.6 本框架可补缺口 `[FACT/INFER]`
 
-Gateway（缺独立逐调用集中策略门禁与跨 Server 统一视图）`[INFER]`；**Binding + arguments_digest（规范确证空白：只绑 Server audience/粗 scope，不绑 tool + 参数）`[FACT]`**；D10（规范仅 rate limit 建议，缺累计预算/成本/副作用准入）`[INFER]`；D11（规范 stateless per-request，缺跨调用状态机与幂等去重）`[INFER]`；Receipt（MCP08 审计缺失，缺签名可验证单次凭证）`[INFER]`；Journal（缺独立权威日志与恢复语义）`[INFER]`。
+Gateway（缺独立逐调用集中策略门禁与跨 Server 统一视图）`[INFER]`；**Binding + arguments_digest（规范层事实：只绑 Server audience/粗 scope，不绑 tool + 参数；但参数级审批原则与消息签名已有相关工作，见 §3.8）`[FACT]`**；D10（规范仅 rate limit 建议，缺累计预算/成本/副作用准入）`[INFER]`；D11（核心协议无通用跨调用事务状态与幂等保证，缺跨调用状态机与幂等去重；Server 可在应用层自建）`[INFER]`；Receipt（MCP08 beta 建议审计，缺独立可验证单次凭证）`[INFER]`；Journal（缺独立权威日志与恢复语义）`[INFER]`。
 
 ### 3.7 可设计实验
 
-① 参数篡改（用户批准 `send_email(to=A)` 后途中改 `to=B`，digest 开关对照——最干净的正向实验）；② Rug pull（描述哈希 pin + 变更复审 vs 按名缓存审批）；③ 跨 Server shadowing（per-server 命名空间 + 用户意图绑定 vs 共享 registry）；④ Tool poisoning 外泄（复现 Invariant `add(sidenote)`，**如实记录出口签名无法阻断的负面结果**）；⑤ token passthrough / confused deputy（audience 校验对照）；⑥ D11 去重 + D10 预算（重放 `tools/call`、循环触发）。每组设无框架基线，记录检出率与误拒率。
+① 参数篡改（用户批准 `send_email(to=A)` 后途中改 `to=B`，digest 开关对照——但须先按 THREAT_MODEL C2 明确攻击者位于 TLS 终止之后的哪个信任边界，否则只是验证「签名能检测参数修改」）；② Rug pull（描述哈希 pin + 变更复审 vs 按名缓存审批）；③ 跨 Server shadowing（per-server 命名空间 + 用户意图绑定 vs 共享 registry）；④ Tool poisoning 外泄（复现 Invariant `add(sidenote)`，**如实记录出口签名无法阻断的负面结果**）；⑤ token passthrough / confused deputy（audience 校验对照）；⑥ D11 去重 + D10 预算（重放 `tools/call`、循环触发）。**强对照按 GO_NO_GO §4 的 A/B/C 三组设置**（A 普通 Host/HITL、B 精确参数审批+原子消费无密码学、C 独立授权方签名+一次性消费），并加入 MCPS 消息签名作扩展对照；记录检出率、重放成功率、并发重复消费率、可验证性与误拒率。
+
+### 3.8 相关工作（★E3-0.1 新增：不能只与「无 Binding MCP」比较）
+
+`[FACT]` 三项已有工作，均直接触及原 GAP-1 论据，必须在研究中作为基线或对照：
+
+| 工作 | 已提供 | 与本方向的关系 |
+|---|---|---|
+| **OWASP AI Agent Security Cheat Sheet**[^W1] | 授权在 agent context 之外执行；`user_confirmed` 不足、须验证属于当前 actor 与精确 tool call；target/参数变更重新审批；执行前原子 check-and-consume；high-impact 审批记录绑定 actor/tool name/target resource/normalized parameters/timestamp/expiry | 「精确参数审批」已是既有设计原则，不可声称为原创 |
+| **OWASP Transaction Authorization Cheat Sheet**[^W2] | 服务端强制、事务数据授权后不可改、每操作唯一凭证、执行前原子消费且用「所有接收服务器共享的状态」防重放 | 「一次性凭证 + 原子消费」已被明确提出；Journal 的共享状态角色须与此对齐比较 |
+| **MCPS**[^W4] `draft-sharif-mcps-secure-mcp-01`（2026-08-21，个人 Internet-Draft，**非已采纳标准**） | Agent Passport、逐消息 ECDSA 签名（JCS 覆盖完整 JSON-RPC，含 `tools/call` name/arguments）、工具定义签名覆盖 description、nonce+timestamp 防重放；§1.2 "does not replace OAuth-based access control"；§11.2 "provides provenance (WHO...), not safety analysis" | **MCPS 证明「消息由谁发、是否被改」，本方向应证明「调用是否经独立授权方批准」**；Agent 可合法签恶意调用，消息签名不能自动证明用户批准。二者互补，不可互相替代 |
+
+`[INFER]` 结论：MCP 场景仍值得优先研究，但**不是因为它有一个别人没发现的 arguments_digest 空白**，而是因为它适合研究「Agent 生成 / 用户批准 / 可信执行三者间能否建立独立且可验证的授权关系」。
 
 ---
 
@@ -168,13 +184,13 @@ Gateway（缺独立逐调用集中策略门禁与跨 Server 统一视图）`[INF
 | LLM 决定工具/参数 | 是 `[FACT]` | 是（SQL 自由生成）`[FACT]` | 是（model-controlled）`[FACT]` |
 | 现有执行前授权 | 多层（平台权限+sandbox+approval+hooks）`[FACT]` | DB 层 RLS/RBAC + 框架粗 RBAC `[FACT]` | OAuth（Server 级）+ HITL `[FACT]` |
 | 现有机制成熟度 | 高（分支保护、签名提交、审计） | 高（RLS、参数化、超时、审计） | 中（beta 安全实践，协议层不强制） |
-| 结构性空白 | 授权决策↔精确参数的密码学绑定（需独立签名方） | token/授权↔SQL 文本的绑定；跨调用状态机 | **token/同意↔tool+参数的绑定（规范确证空白）** `[FACT]` |
+| 结构性空白 | 授权决策↔精确参数的密码学绑定（需独立签名方） | token/授权↔SQL 文本的绑定；跨调用状态机 | **独立授权批准↔跨信任域一次性凭证（规范无 token↔tool+参数绑定是事实，但参数审批/消息签名已有相关工作）** `[FACT/INFER]` |
 | Binding 有效性前提 | 需授权方≠执行方 | SQL 文本能否提取授权语义待验证 | **需绑定用户意图而非模型输出** |
 | 最危险风险 | 注入→读取/外泄、策略绕过 | 合法权限内生成泄露性 SQL（Binding 无效） | tool poisoning / shadowing（推理侧，出口签名错位） |
 | 一手攻击证据 | CamoLeak、CVE-2025-62453、AgentDojo ASR | P2SQL (ICSE'25)、arXiv:2211.15363、ToxicSQL | Invariant tool poisoning、CVE-2025-49596、arXiv:2503.23278 |
-| 对框架适配性 | 中（重复度高，需独立信任边界才成立） | 中（DB 层已强，Binding 对 SQL 语义存疑） | **相对最高**（规范空白确证、注入点明确） |
+| 对框架适配性 | 中（重复度高，需独立信任边界才成立） | 中（DB 层已强，Binding 对 SQL 语义存疑） | **相对最高**（规范无 token↔tool+参数绑定是事实、注入点明确；但相关工作已多，须靠 A/B/C 强对照证明增量） |
 
-**初判（待后续威胁模型与差距分析确认）**：MCP 场景的 `arguments_digest` 空白有一手规范原文支撑、实验切入点最干净；但三场景共同的关键约束是——Binding 必须绑定**用户授权意图**而非**模型输出参数**，否则注入产生的恶意参数会被合法签名。这一约束能否满足，是 GO/NO-GO 的核心，将在 `E3_0_RESEARCH_GAP.md` 与 `E3_0_GO_NO_GO.md` 中展开。
+**初判（待后续威胁模型与差距分析确认）**：MCP 场景仍相对优先，但**不再因为「arguments_digest 是唯一规范空白」**——参数级审批（OWASP Cheat Sheets）与消息签名/防重放（MCPS）已有相关工作。真正的研究问题是「独立授权方的动作批准能否成为跨信任边界可验证、不可替换/重放的一次性凭证」。三场景共同的关键约束：Binding 必须绑定**用户确认的具体动作**而非**模型输出参数**，否则注入产生的恶意参数会被合法签名；且须证明 C 组相对 B 组（普通应用层审批）有可测增量。这些将在 `E3_0_RESEARCH_GAP.md` 与 `E3_0_GO_NO_GO.md` 中展开。
 
 ---
 
@@ -193,10 +209,13 @@ Gateway（缺独立逐调用集中策略门禁与跨 Server 统一视图）`[INF
 [^D3]: Microsoft Learn, "Genie setup / Unity Catalog" — learn.microsoft.com/.../genie-agents/set-up
 [^D4]: arXiv:2211.15363 (ISSRE 2023)；arXiv:2503.05445 (ToxicSQL)
 [^D5]: PostgreSQL Docs, "Row Security Policies" — postgresql.org/docs/current/ddl-rowsecurity ; "Client Connection Defaults" — postgresql.org/docs/current/runtime-config-client.html ; OWASP A05:2025-Injection
-[^M1]: MCP Specification 2025-06-18, "Authorization" — modelcontextprotocol.io/specification/2025-06-18/basic/authorization（关键段落已二次核实：resource=server canonical URI；token passthrough 禁令）
-[^M2]: MCP Docs, "Tools" — modelcontextprotocol.io/docs/concepts/tools（model-controlled、inputSchema、untrusted annotations、security considerations 已二次核实）
-[^M3]: OWASP MCP Top 10 (2025, **beta / Phase 3**) — owasp.org/www-project-mcp-top-10（十类名称与 MCP08 immutable audit trails 已二次核实）
+[^M1]: MCP Specification **2026-07-28**, "Authorization" — modelcontextprotocol.io/specification/2026-07-28/basic/authorization（E3-0.1 已按新版二次核实：resource MUST = server canonical URI；无 token↔tool+参数绑定；token 发送/接受/转发禁令与 confused deputy 列入 Security Considerations；"scopes may be determined dynamically based on specific request arguments" 指 challenge 的 scope 决定，非 token 参数绑定）
+[^M2]: MCP Specification **2026-07-28**, "Tools" — modelcontextprotocol.io/specification/2026-07-28/server/tools（E3-0.1 已按新版二次核实：model-controlled；inputSchema 2020-12 必为合法 object；annotations MUST 视为不可信；human-in-the-loop 与 confirmation prompts 为 **SHOULD**；"MCP itself cannot enforce these security principles at the protocol level" 见主页 2026-07-28）
+[^M3]: OWASP MCP Top 10 (2025, **beta / Phase 3**) — owasp.org/www-project-mcp-top-10（十类名称与 MCP08 "immutable audit trails" 建议已二次核实；beta 实践建议，非 MCP 协议强制）
 [^M4]: MCP Specification, "Security Best Practices" — modelcontextprotocol.io/specification/.../security_best_practices
 [^M5]: Invariant Labs, "MCP Security Notification: Tool Poisoning Attacks" — invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks (2025-04-01)
 [^M6]: CVE-2025-49596 (MCP Inspector RCE, CVSS 9.4) — NVD 条目（二手转引 avd.aliyun.com/detail?id=AVD-2025-49596，待 NVD 原条目核实 `[ASSUMPTION]`）
+[^W1]: OWASP Cheat Sheet Series, "AI Agent Security Cheat Sheet" — cheatsheetseries.owasp.org/cheatsheets/AI_Agent_Security_Cheat_Sheet.html（§1 Tool Authorization Middleware、§4 High-Impact Action Integrity Controls，逐字核实；原文用 "normalized parameters" 与小写 "actor"）
+[^W2]: OWASP Cheat Sheet Series, "Transaction Authorization Cheat Sheet" — cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html（§1.1、§1.5、§2.1、§2.3、§2.6、§2.8、§2.10，逐字核实）
+[^W4]: R. Sharif, "MCPS: Cryptographic Security Layer for the Model Context Protocol", `draft-sharif-mcps-secure-mcp-01`, 2026-08-21 — datatracker.ietf.org/doc/draft-sharif-mcps-secure-mcp/（个人 Internet-Draft，"work in progress"，非已采纳标准；§1.2/§1.3/§5/§6/§7/§11.1/§11.2 逐字核实）
 [^M7]: arXiv:2503.23278；arXiv:2504.03767 (MCPSafetyScanner)
