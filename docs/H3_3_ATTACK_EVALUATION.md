@@ -222,7 +222,7 @@ SQLite ground truth 按 `.gitignore` 不入库，正式 JSONL/CSV/JSON 入库供
 - 全量 `unittest discover -s tests`：**377 测试 OK**（= H3.2 的 369 + H3.3 的 8），
   skipped 12。首次运行出现 1 例 `test_W08_a1_lock_serializes_two_executors_shared_store`
   `attempt to write a readonly database`（E1.9 冻结的跨进程文件锁测试）失败；单独重跑该
-  测试 **OK**，随后完整复跑 **374 OK / 0 失败**，确认为偶发时序竞态，与本阶段改动无关
+  测试 **OK**，随后完整复跑 **377 OK / 0 失败**，确认为偶发时序竞态，与本阶段改动无关
   （H3.3 不触碰 E1.9/E2 代码）。复跑 stderr 中的 `WinError 10038` 来自冻结 H1
   `AuthServiceTLSServer._serve` 线程关闭竞态（退出码 0、结果 OK），同理不改 H1。
 
