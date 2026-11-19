@@ -8,8 +8,12 @@ internals; no verdict is manufactured.
 Capability matrix (what each scheme is EXPECTED to detect):
 
   T1 normal        A,B,C: none (no false positive)
-  T2 under-report  A: blind ; B,C: MISSING_USAGE_EVENT
-  T3 delete record A: blind ; B,C: MISSING_USAGE_EVENT
+  T2 under-report  A: blind ; B: MISSING_USAGE_EVENT
+                   C: MISSING_USAGE_EVENT + UNKNOWN_EVENT
+                   (the independent observer HAS an observation but the service
+                    metering record is absent -> an extra cross-source finding)
+  T3 delete record A: blind ; B: MISSING_USAGE_EVENT
+                   C: MISSING_USAGE_EVENT + UNKNOWN_EVENT (same as T2)
   T4 tamper value  A,B,C: INVALID_SIGNATURE
   T5 duplicate     A,B,C: DUPLICATE_USAGE_EVENT (identical=count once;
                     conflict=reject)
@@ -46,8 +50,14 @@ TRIALS = 10
 # Capability expectations, consumed by the result aggregator.
 EXPECTED: dict[str, dict[str, list[str]]] = {
     "T1": {"A": [], "B": [], "C": []},
-    "T2": {"A": [], "B": ["MISSING_USAGE_EVENT"], "C": ["MISSING_USAGE_EVENT"]},
-    "T3": {"A": [], "B": ["MISSING_USAGE_EVENT"], "C": ["MISSING_USAGE_EVENT"]},
+    # Scheme C emits an ADDITIONAL UNKNOWN_EVENT for T2/T3: the independent
+    # observer has an observation for the event id but there is no accepted
+    # service usage to attach it to. This is preserved (not collapsed into
+    # MISSING_USAGE_EVENT) as extra evidence from the independent source.
+    "T2": {"A": [], "B": ["MISSING_USAGE_EVENT"],
+           "C": ["MISSING_USAGE_EVENT", "UNKNOWN_EVENT"]},
+    "T3": {"A": [], "B": ["MISSING_USAGE_EVENT"],
+           "C": ["MISSING_USAGE_EVENT", "UNKNOWN_EVENT"]},
     "T4": {"A": ["INVALID_SIGNATURE"], "B": ["INVALID_SIGNATURE"], "C": ["INVALID_SIGNATURE"]},
     "T5": {"A": ["DUPLICATE_USAGE_EVENT"], "B": ["DUPLICATE_USAGE_EVENT"], "C": ["DUPLICATE_USAGE_EVENT"]},
     "T6": {"A": [], "B": [], "C": []},

@@ -1,6 +1,6 @@
 # R2.4 Phase-1 — Independent Event Witness & Trustworthy Metering
 
-Generated: 2026-11-19T11:46:30.642480+00:00
+Generated: 2026-11-19T11:53:49.585285+00:00
 Seed base: 20261119 · trials/scenario: 10 · total trial records: 80
 
 ## Scope boundary (read first)
@@ -24,6 +24,16 @@ ACCEPTED · MISSING_USAGE_EVENT · DUPLICATE_USAGE_EVENT · INVALID_SIGNATURE ·
 
 REGISTERED -> DISPATCHED -> {MEASURED | PARTIAL | UNCERTAIN}; MEASURED/PARTIAL/UNCERTAIN -> CORRECTED -> FINALIZED. `EventWitness.advance_status()` NOW ENFORCES `LEGAL_TRANSITIONS`: undefined status strings and illegal jumps are rejected with the DB row (status AND signature) left byte-identical. FINALIZED is terminal (irreversible); UNCERTAIN -> FINALIZED is illegal (must pass CORRECTED), so an uncertain event cannot settle directly. 7 dedicated tests (test_state_machine.py) cover illegal jumps, repeated terminal transition, uncertain-bypass and undefined states.
 
+## Service identity binding (review round 3)
+
+- `EventWitness.register_intent()` now fails closed when `service_id` is not in its configured allow-list; rejection happens before any DB write.
+- The verifier linkage check now also requires `usage.source_id == execution.service_id`; a VALID signature from service B submitted for an execution registered for service A is rejected as `INVALID_EVENT_LINKAGE` and is NOT billed. Scheme A has no witness and is honestly blind to this (it cannot know which service was registered). 3 dedicated tests (test_service_identity_binding.py) cover the B-for-A attack, the allow-list rejection, and a no-false-positive matching case.
+
+## Scheme C extra UNKNOWN_EVENT in T2/T3 (declared, not hidden)
+
+- In T2/T3 scheme C the verifier emits BOTH `MISSING_USAGE_EVENT` (witness has an intent, no accepted service usage) AND `UNKNOWN_EVENT` (the independent observer HAS an observation but there is no accepted service usage to attach it to). Both verdicts are now DECLARED in the C expectation matrix for T2/T3 instead of only listing `MISSING_USAGE_EVENT`. The extra `UNKNOWN_EVENT` is preserved (not collapsed) because it is additional evidence from the independent observation source.
+- The same `UNKNOWN_EVENT` code path can also fire in T4/T8 scheme C whenever an observation exists without an accepted service usage (e.g. a tampered signature invalidates the usage). Those scenarios already declare their own expected verdicts and the extra finding is not counted as a false positive; this round scoped the matrix correction to T2/T3 as requested.
+
 ## T2 vs T3 — two distinct attacks, both surfacing as MISSING_USAGE_EVENT
 
 - **T2 service under-reporting**: the service never submits a metering record (service DB holds only 1 usage row). The verifier is given exactly what the service emitted.
@@ -38,10 +48,10 @@ REGISTERED -> DISPATCHED -> {MEASURED | PARTIAL | UNCERTAIN}; MEASURED/PARTIAL/U
 | T1 | C | — (blind/normal) | N/A | 0% | N/A |
 | T2 | A | — (blind/normal) | N/A | 0% | N/A |
 | T2 | B | MISSING_USAGE_EVENT | 100% | 0% | 0% |
-| T2 | C | MISSING_USAGE_EVENT | 100% | 0% | 0% |
+| T2 | C | MISSING_USAGE_EVENT, UNKNOWN_EVENT | 100% | 0% | 0% |
 | T3 | A | — (blind/normal) | N/A | 0% | N/A |
 | T3 | B | MISSING_USAGE_EVENT | 100% | 0% | 0% |
-| T3 | C | MISSING_USAGE_EVENT | 100% | 0% | 0% |
+| T3 | C | MISSING_USAGE_EVENT, UNKNOWN_EVENT | 100% | 0% | 0% |
 | T4 | A | INVALID_SIGNATURE | 100% | 0% | 0% |
 | T4 | B | INVALID_SIGNATURE | 100% | 0% | 0% |
 | T4 | C | INVALID_SIGNATURE | 100% | 0% | 0% |

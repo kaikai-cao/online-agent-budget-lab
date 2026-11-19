@@ -72,7 +72,17 @@ class EventWitness:
         request_digest: str,
         registered_at: str,
     ) -> ExecutionEvent:
-        """Register an execution intent. Fails closed on duplicate event_id."""
+        """Register an execution intent. Fails closed on duplicate event_id.
+
+        Also fails closed when ``service_id`` is NOT in this witness's configured
+        allow-list (``service_ids``). The witness only registers intents for
+        services it was configured to observe; an unknown/unlisted service must
+        never enter its log. Rejection happens BEFORE any DB write.
+        """
+        if service_id not in self.service_ids:
+            raise ValueError(
+                f"service_id {service_id!r} not in witness allowlist {self.service_ids!r}"
+            )
         with closing(self._connect()) as con:
             row = con.execute(
                 "SELECT sequence_no FROM execution_events ORDER BY sequence_no DESC LIMIT 1"

@@ -52,7 +52,8 @@
         "MISSING_USAGE_EVENT"
       ],
       "C": [
-        "MISSING_USAGE_EVENT"
+        "MISSING_USAGE_EVENT",
+        "UNKNOWN_EVENT"
       ]
     },
     "key_fingerprints": {

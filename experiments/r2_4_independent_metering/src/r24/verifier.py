@@ -168,13 +168,21 @@ def verify_scheme(scheme: str, ctx: VerifyContext) -> list[VerificationResult]:
                                   "witness registered event has no accepted usage record",
                                   sequence_no=ee.sequence_no, witness_status=ee.status))
                 continue
-            # linkage: run/operation/attempt must all match
+            # linkage: run/operation/attempt AND the service identity must match.
+            # service_id in the witness registration is the service that was
+            # INTENDED to execute; source_id is the service that SIGNED the usage
+            # claim. A legitimate signature from service B must NOT be accepted
+            # as the metering record for an execution registered for service A.
             if (ue.run_id != ee.run_id or ue.operation_id != ee.operation_id
-                    or ue.attempt_id != ee.attempt_id):
+                    or ue.attempt_id != ee.attempt_id
+                    or ue.source_id != ee.service_id):
                 results.append(_v(Verdict.INVALID_EVENT_LINKAGE, ee.event_id, scheme,
-                                  "usage fields do not match witness registration",
-                                  witness=(ee.run_id, ee.operation_id, ee.attempt_id),
-                                  usage=(ue.run_id, ue.operation_id, ue.attempt_id)))
+                                  "usage fields (incl. signing service) do not match "
+                                  "witness registration",
+                                  witness=(ee.run_id, ee.operation_id, ee.attempt_id,
+                                           ee.service_id),
+                                  usage=(ue.run_id, ue.operation_id, ue.attempt_id,
+                                         ue.source_id)))
 
         # usage events with no witness registration
         for event_id, ue in accepted_usage.items():

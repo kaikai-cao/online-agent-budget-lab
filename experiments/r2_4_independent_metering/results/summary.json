@@ -86,7 +86,8 @@
         "detection_rate": 1.0,
         "expected_correct": 10,
         "expected_verdicts": [
-          "MISSING_USAGE_EVENT"
+          "MISSING_USAGE_EVENT",
+          "UNKNOWN_EVENT"
         ],
         "false_negative_rate": 0.0,
         "false_positive_count": 0,
@@ -124,7 +125,8 @@
         "detection_rate": 1.0,
         "expected_correct": 10,
         "expected_verdicts": [
-          "MISSING_USAGE_EVENT"
+          "MISSING_USAGE_EVENT",
+          "UNKNOWN_EVENT"
         ],
         "false_negative_rate": 0.0,
         "false_positive_count": 0,
@@ -335,7 +337,7 @@
       "scheme_C_detects": true
     }
   },
-  "generated_utc": "2026-11-19T11:46:30.638449+00:00",
+  "generated_utc": "2026-11-19T11:53:49.581044+00:00",
   "scenarios": [
     "T1",
     "T2",

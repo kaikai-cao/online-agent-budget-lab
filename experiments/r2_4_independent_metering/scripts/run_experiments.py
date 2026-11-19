@@ -148,6 +148,37 @@ def write_report(matrix, control, n_records):
                  "(test_state_machine.py) cover illegal jumps, repeated terminal "
                  "transition, uncertain-bypass and undefined states.")
     lines.append("")
+    lines.append("## Service identity binding (review round 3)")
+    lines.append("")
+    lines.append("- `EventWitness.register_intent()` now fails closed when `service_id` "
+                 "is not in its configured allow-list; rejection happens before any "
+                 "DB write.")
+    lines.append("- The verifier linkage check now also requires "
+                 "`usage.source_id == execution.service_id`; a VALID signature from "
+                 "service B submitted for an execution registered for service A is "
+                 "rejected as `INVALID_EVENT_LINKAGE` and is NOT billed. Scheme A has "
+                 "no witness and is honestly blind to this (it cannot know which "
+                 "service was registered). 3 dedicated tests "
+                 "(test_service_identity_binding.py) cover the B-for-A attack, the "
+                 "allow-list rejection, and a no-false-positive matching case.")
+    lines.append("")
+    lines.append("## Scheme C extra UNKNOWN_EVENT in T2/T3 (declared, not hidden)")
+    lines.append("")
+    lines.append("- In T2/T3 scheme C the verifier emits BOTH `MISSING_USAGE_EVENT` "
+                 "(witness has an intent, no accepted service usage) AND "
+                 "`UNKNOWN_EVENT` (the independent observer HAS an observation but "
+                 "there is no accepted service usage to attach it to). Both verdicts "
+                 "are now DECLARED in the C expectation matrix for T2/T3 instead of "
+                 "only listing `MISSING_USAGE_EVENT`. The extra `UNKNOWN_EVENT` is "
+                 "preserved (not collapsed) because it is additional evidence from "
+                 "the independent observation source.")
+    lines.append("- The same `UNKNOWN_EVENT` code path can also fire in T4/T8 scheme C "
+                 "whenever an observation exists without an accepted service usage "
+                 "(e.g. a tampered signature invalidates the usage). Those scenarios "
+                 "already declare their own expected verdicts and the extra finding "
+                 "is not counted as a false positive; this round scoped the matrix "
+                 "correction to T2/T3 as requested.")
+    lines.append("")
     lines.append("## T2 vs T3 — two distinct attacks, both surfacing as MISSING_USAGE_EVENT")
     lines.append("")
     lines.append("- **T2 service under-reporting**: the service never submits a metering "
