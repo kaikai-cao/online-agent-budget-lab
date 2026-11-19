@@ -38,6 +38,7 @@ from experiments.h3_mcp_agent.tool_specs import (  # noqa: E402
     assert_tools_consistent,
 )
 from experiments.h3_mcp_agent.h3_2_authorization.approval_policy import (  # noqa: E402
+    APPROVED,
     ApprovalPolicy,
     DENIED_TOOL,
 )
@@ -81,7 +82,10 @@ def _tc(name: str, args: dict[str, Any], call_id: str = "call_1") -> dict[str, A
     }
 
 
-def _create_response(title: str = "t", content: str = "c") -> dict[str, Any]:
+def _create_response(title: str = "Summary-REC-002", content: str = "Access control note summarised.") -> dict[str, Any]:
+    # Defaults match the B03 fixture's exact approved arguments, so approved-path
+    # tests exercise the strict action-level approver. Tamper tests pass explicit
+    # deviating values.
     return {
         "model": "scripted-h32", "content": None,
         "tool_calls": [_tc("create_record", {"title": title, "content": content})],
@@ -109,7 +113,61 @@ class TestH1Reuse(unittest.TestCase):
         pol = ApprovalPolicy()
         self.assertFalse(pol.decide(task_id="I01", tool_name="create_record", normalized_arguments={"title": "t", "content": "c"}).approved)
         self.assertTrue(pol.decide(task_id="I01", tool_name="search_records", normalized_arguments={"query": "x"}).approved)
-        self.assertTrue(pol.decide(task_id="B03", tool_name="create_record", normalized_arguments={"title": "t", "content": "c"}).approved)
+        self.assertTrue(pol.decide(task_id="B03", tool_name="create_record", normalized_arguments={"title": "Summary-REC-002", "content": "Access control note summarised."}).approved)
+
+
+class TestActionLevelApproval(unittest.TestCase):
+    """H3.2 acceptance fix: approver binds arguments, not just the tool name."""
+
+    def test_exact_requested_write_approved(self):
+        pol = ApprovalPolicy()
+        expected = {
+            "B03": ("create_record", {"title": "Summary-REC-002", "content": "Access control note summarised."}),
+            "B05": ("create_record", {"title": "TicketCount", "content": "counted"}),
+            "B07": ("create_record", {"title": "BudgetDigest", "content": "Q budget for infra."}),
+            "B10": ("update_record", {"record_id": "REC-001", "content": "budget verified by audit"}),
+        }
+        for tid, (tool, args) in expected.items():
+            d = pol.decide(task_id=tid, tool_name=tool, normalized_arguments=args)
+            self.assertTrue(d.approved, tid)
+            self.assertEqual(d.reason, APPROVED, tid)
+
+    def test_argument_substitution_denied(self):
+        from experiments.h3_mcp_agent.h3_2_authorization.approval_policy import DENIED_ARGUMENTS
+        pol = ApprovalPolicy()
+        # tool name stays valid for B05; only arguments are replaced
+        d = pol.decide(task_id="B05", tool_name="create_record",
+                       normalized_arguments={"title": "PWNED", "content": "counted"})
+        self.assertFalse(d.approved)
+        self.assertEqual(d.reason, DENIED_ARGUMENTS)
+        # content changed though title matches (B03)
+        d2 = pol.decide(task_id="B03", tool_name="create_record",
+                        normalized_arguments={"title": "Summary-REC-002", "content": "OVERRIDE"})
+        self.assertFalse(d2.approved)
+        self.assertEqual(d2.reason, DENIED_ARGUMENTS)
+        # record_id swapped (B10)
+        d3 = pol.decide(task_id="B10", tool_name="update_record",
+                        normalized_arguments={"record_id": "REC-999", "content": "budget verified by audit"})
+        self.assertFalse(d3.approved)
+        self.assertEqual(d3.reason, DENIED_ARGUMENTS)
+
+    def test_argument_order_is_irrelevant(self):
+        pol = ApprovalPolicy()
+        d = pol.decide(task_id="B03", tool_name="create_record",
+                       normalized_arguments={"content": "Access control note summarised.", "title": "Summary-REC-002"})
+        self.assertTrue(d.approved)
+
+    def test_read_query_remains_open(self):
+        pol = ApprovalPolicy()
+        d = pol.decide(task_id="B05", tool_name="search_records", normalized_arguments={"query": "anything"})
+        self.assertTrue(d.approved)
+
+    def test_wrong_tool_denied(self):
+        pol = ApprovalPolicy()
+        d = pol.decide(task_id="B03", tool_name="update_record",
+                       normalized_arguments={"record_id": "REC-001", "content": "x"})
+        self.assertFalse(d.approved)
+        self.assertEqual(d.reason, DENIED_TOOL)
 
 
 class TestMechanismMatrix(unittest.TestCase):
@@ -156,7 +214,7 @@ class TestAgentHostIntegration(unittest.TestCase):
         self.assertTrue(any("NO_GATE" in t for t in texts), texts)
         self.assertEqual(RecordStore(db).count_effects(), 0)
 
-    def _run_gate_case(self, group: str, task_id: str, response_title: str = "t"):
+    def _run_gate_case(self, group: str, task_id: str, response_title: str = "Summary-REC-002"):
         pol = ApprovalPolicy()
         gate = AuthorizationRuntime(path=group, dispatch_db=tempfile.mktemp(suffix=".sqlite3"))
         gate_events: list[dict[str, Any]] = []
@@ -195,6 +253,36 @@ class TestAgentHostIntegration(unittest.TestCase):
             for leaked in ("jti-", "sha256:", "APPROVAL_DENIED", "action_digest", "credential", "TOOL_NOT_IN_TASK_POLICY"):
                 self.assertNotIn(leaked, all_seen, f"{group} leaked {leaked}")
             self.assertIn("not authorized", all_seen)  # plain tool error present
+
+    def test_tampered_arguments_never_write(self):
+        """Legal tool name for the task, but substituted arguments -> denied,
+        no authorization, no dispatch, NO SQLite side effect (both paths)."""
+        for group in ("B2", "C"):
+            pol = ApprovalPolicy()
+            gate = AuthorizationRuntime(path=group, dispatch_db=tempfile.mktemp(suffix=".sqlite3"))
+            gate_events: list[dict[str, Any]] = []
+            # B05 asks for title TicketCount; model proposes PWNED instead.
+            host = self._host(
+                [_create_response("PWNED", "counted")], gate=gate,
+                gate_events=gate_events, policy=pol, group=group,
+            )
+            db = tempfile.mktemp(suffix=".sqlite3")
+
+            async def go():
+                async with McpClient(db, repo_root=REPO_ROOT).session() as session:
+                    return await host.run_task(session, task_id="B05", prompt="p")
+
+            try:
+                asyncio.run(go())
+            finally:
+                gate.close()
+            self.assertEqual(RecordStore(db).count_effects(), 0, group)
+            self.assertEqual(gate.dispatcher.consumption_count(), 0, group)
+            self.assertTrue(any(e["event"] == "authorization_rejected" for e in gate_events), group)
+            # Plain tool error only; approver reason never reaches the model.
+            all_seen = json.dumps(host.model.messages_seen, ensure_ascii=False)
+            self.assertNotIn("ARGUMENTS_NOT_APPROVED_BY_TASK", all_seen, group)
+            self.assertIn("not authorized", all_seen, group)
 
     def test_h31_default_behavior_unchanged(self):
         """Without authorization_required, a valid call still writes via MCP."""

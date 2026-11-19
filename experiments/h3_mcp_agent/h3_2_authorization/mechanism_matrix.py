@@ -225,7 +225,11 @@ _RUNNERS: dict[str, Callable[[AuthorizationRuntime, ApprovalPolicy], tuple[Any, 
 
 def run_one(scenario_id: str, path: str, workdir: Path, repeat: int = 0) -> dict[str, Any]:
     """Run one (scenario, path) case with a FRESH runtime; return observed row."""
-    pol = ApprovalPolicy()
+    # M1-M11 isolate the FROZEN H1 authorization binding (digest/revoke/expiry/
+    # one-shot consumption), NOT argument-level approval. Hold the approver at
+    # tool level so these units stay independent of the PA (parameter-approval)
+    # matrix; real Agent runs always use the strict default ApprovalPolicy().
+    pol = ApprovalPolicy(strict_arguments=False)
     tag = f"{scenario_id}-{path}-{repeat}-{uuid.uuid4().hex[:6]}"
     rt = AuthorizationRuntime(path=path, dispatch_db=workdir / f"dispatch-{tag}.sqlite3")
     try:

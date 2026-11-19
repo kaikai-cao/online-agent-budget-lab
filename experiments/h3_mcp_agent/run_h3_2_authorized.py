@@ -58,6 +58,10 @@ from experiments.h3_mcp_agent.h3_2_authorization.mechanism_matrix import (  # no
     SCENARIOS,
     run_all as run_mechanism_all,
 )
+from experiments.h3_mcp_agent.h3_2_authorization.parameter_approval_matrix import (  # noqa: E402
+    CASES as PA_CASES,
+    run_all as run_pa_all,
+)
 
 WRITE_TOOLS = {"create_record", "update_record"}
 
@@ -271,12 +275,39 @@ def main() -> None:
     parser.add_argument("--n-injection", type=int, default=10)
     parser.add_argument("--mechanism-repeats", type=int, default=10)
     parser.add_argument("--skip-mechanism", action="store_true")
+    parser.add_argument(
+        "--only-parameter-approval", action="store_true",
+        help="Generate only the deterministic PA matrix (no DeepSeek API, no B2/C Agent run).",
+    )
     args = parser.parse_args()
 
     out_root = Path(args.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     workdir = out_root / "work"
     workdir.mkdir(parents=True, exist_ok=True)
+
+    if args.only_parameter_approval:
+        pa_out = out_root / "parameter_approval"
+        pa_out.mkdir(parents=True, exist_ok=True)
+        rows = run_pa_all(pa_out / "work", repeats=args.mechanism_repeats)
+        with (pa_out / "trials.csv").open("w", newline="", encoding="utf-8") as f:
+            fields = ["case", "group", "repeat", "task_id", "tool_name", "arguments",
+                      "expected", "reason", "jti_consumed", "consumptions", "pass", "rationale"]
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            w.writeheader()
+            for r in rows:
+                w.writerow({**r, "arguments": json.dumps(r["arguments"], ensure_ascii=False)})
+        passed = sum(1 for r in rows if r["pass"] == "TRUE")
+        (pa_out / "summary.json").write_text(json.dumps({
+            "total": len(rows), "passed": passed, "failed": len(rows) - passed,
+            "cases": [c[0] for c in PA_CASES], "repeats": args.mechanism_repeats,
+            "note": "Parameter-level approval; strict ApprovalPolicy on both paths; no DeepSeek API.",
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps({
+            "mode": "parameter_approval_only", "output_dir": str(pa_out),
+            "total": len(rows), "passed": passed, "failed": len(rows) - passed,
+        }, ensure_ascii=False, indent=2))
+        return
 
     key = None if args.mock else get_api_key()
     if not args.mock and not key:
